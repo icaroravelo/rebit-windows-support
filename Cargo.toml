@@ -1,0 +1,17 @@
+[package]
+name = "rebit-rust"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Independent Rust DSP engine for the Rebit 8-bit synthesizer"
+
+[lib]
+name = "rebit_rust"
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "rebit-render"
+path = "src/bin/render.rs"
+
+[profile.release]
+panic = "abort"
