@@ -1,0 +1,284 @@
+# Rebit Rust
+
+A separate Rust edition of Rebit, with its own plugin identity. Builds use the
+Rust core and the pinned JUCE source in this folder; the earlier C++ project is
+not required.
+
+**Rust owns synthesis, voices, MIDI behavior, modulation, and sequence parsing.**
+A small C++/JUCE layer supplies the existing editor, host parameters, saved state,
+and AU / VST3 / standalone packaging. This is a hybrid plugin, not an all-Rust UI
+or a binary-compatible replacement for the original Rebit.
+
+The development milestones are tracked in [ROADMAP.md](ROADMAP.md).
+
+## Interface
+
+The editor uses a game-console-inspired dark chassis, an original vector pixel
+wordmark, lime/cyan accents, glowing waveform and ADSR previews, stepped rotary
+rings, and a custom keyboard with octave scrolling. All artwork and glow effects
+are drawn with JUCE paths and gradients; no image assets or external fonts are
+required. Waveform and envelope displays are parameter previews, not audio meters.
+
+Knob values remain editable, and double-click resets a knob to its default.
+The independent arpeggiator works at every voice count. The MONO tab holds the
+legacy one-voice modes; glide is available there with Arp off. Colours
+separate oscillator, amplitude, performance, modulation, and sequence controls.
+
+See `preview.png` for the default patch and `preview-showcase.png` for a populated
+patch rendered from the actual editor. The showcase does not change defaults.
+
+## Run it
+
+On this Mac, after building, open:
+
+```
+open "build/RebitRust_artefacts/Release/Standalone/Rebit Rust.app"
+```
+
+Select MIDI input in the standalone's Options menu or play the on-screen keys.
+The AU and VST3 builds are in the sibling `AU` and `VST3` output folders.
+Nothing is installed automatically. To use a plugin in a DAW, copy **Rebit
+Rust.component** into `~/Library/Audio/Plug-Ins/Components`, or **Rebit Rust.vst3**
+into `~/Library/Audio/Plug-Ins/VST3`, then rescan/restart the host. These names and
+identities differ from Rebit's, so both versions can coexist.
+
+## Build
+
+Requires Rust/Cargo, CMake 3.22+, and Xcode command-line tools on macOS. No
+third-party Rust crates or network access are needed.
+
+```
+./scripts/build.sh
+```
+
+The default JUCE source is the pinned 8.0.12 checkout in `vendor/JUCE`. Native
+builds are independent of the old project. To use another JUCE 8 checkout:
+
+```
+./scripts/build.sh -DJUCE_PATH=/absolute/path/to/JUCE
+```
+
+Builds target the current Mac architecture (the verified local build is arm64).
+Universal/x86_64 cross-build automation is not provided yet; CMake rejects an
+architecture override rather than silently linking an incompatible Rust archive.
+Builds are locally ad-hoc signed, not notarized.
+
+The Rust core and offline renderer also work independently of JUCE:
+
+```
+cargo test --offline --locked
+cargo clippy --offline --locked --all-targets -- -D warnings
+cargo run --release --offline --locked --bin rebit-render -- demo.wav pulse
+```
+
+Use `triangle` or `noise` instead of `pulse` for other demos. The renderer writes
+four seconds of 48 kHz stereo PCM16 audio without opening an audio device.
+It clips only during PCM conversion; the plugin itself has no output limiter.
+Use a lower gain when stacking many voices.
+
+## Instrument
+
+- Pulse (12.5%, 25%, 50%), stepped triangle, 4-bit random, and long/short LFSR noise.
+- 1–64 voices, velocity, ADSR, per-channel pitch bend and mod wheel.
+- Mono legato with glide and return to the previous held note; retrigger mode;
+  legacy ascending/descending arpeggios with frame, tempo, or seconds clocks.
+- Independent arpeggiator: five patterns, 1–4 octaves, gate, swing, latch,
+  retrigger/legato, and straight/dotted/triplet/seconds clocks.
+- Delayed vibrato and automatic pitch sweep.
+- Sustain (CC64), sostenuto (CC66), reset controllers (CC121), All Notes Off
+  (CC123, respecting pedals), and channel-local All Sound Off (CC120).
+- Volume, pitch, and pulse-duty sequences, compiled outside audio processing.
+- Host automation and versioned state saving/recall.
+
+Select **1 voice** with **Arp off** for the legacy mono/glide modes. Changing
+voice count or mono behavior in that legacy mode resets held-key tracking.
+With the independent arp on, the held chord survives those changes; reducing
+voice count can cut release tails. Pitch is capped below Nyquist for extreme
+notes/modulation; this lo-fi oscillator implementation is not bandlimited.
+
+## Independent arpeggiator
+
+In **PERFORMANCE → ARP**, turn **Arp on** on and hold a chord. Any voice count
+works. **Voices** limits overlapping generated notes and their release tails.
+The default is Up at 1/16, one octave, 65% Gate, no Swing, and Retrigger.
+
+- **Pattern:** Up, Down, Up/Down (without repeated end notes), Random, Played
+  order. Played order keeps key-entry order within each octave.
+- **Rate:** quarter through 64th notes, plus dotted (1.5x) and triplet (2/3)
+  versions. Rates follow host tempo; standalone uses 120 BPM without a host.
+  Choose Seconds to unlock **Step Time**, 0.010–2.000 seconds per unswung step.
+- **Octaves:** one to four, expanded upward. MIDI pitches above 127 are skipped.
+- **Gate:** 5–100% of each swung step is held. Gate starts the release stage;
+  release tails can continue after the gate closes.
+- **Swing:** 0–49% alternately lengthens/shortens steps while preserving each
+  pair's total duration. It works with musical and seconds rates.
+- **Latch:** released notes keep playing. After all physical keys lift, a new
+  chord replaces the latched chord. Turn Latch off to discard unheld notes that
+  pedals are not retaining. **STOP** stops all voices and clears held/latch and
+  controller state; a new chord restarts the enabled arp.
+- **Envelope / Retrigger:** every generated step restarts oscillator phase,
+  ADSR, sweep/vibrato timing, and all three sequences. Release tails may overlap.
+- **Envelope / Legato:** at 100% Gate, pitches change within the same continuous
+  voice, so envelope and sequence progress continue. Shorter gates create gaps
+  and the next note starts fresh. This articulation does not add glide.
+
+The pitch sequence adds its offset to the generated arpeggio pitch. For a first
+arp test, switch the Pitch sequence off. Sustain and sostenuto retain input
+chord notes while the arp still observes Gate. All Notes Off clears latch for
+that channel (respecting pedals); All Sound Off clears that channel immediately.
+Random state is local and deterministic, independent of other plugin instances.
+
+The **MONO** tab retains the old parameter IDs and modes for earlier patches.
+Its legacy arp is overridden when the independent **Arp on** switch is enabled.
+Older version-1 patches load with the independent arp off and its new settings at
+defaults. New settings are saved with normal host state; plugin identity is unchanged.
+The arp generates internal synth notes, not MIDI output to other instruments.
+
+### Host transport synchronization
+
+**Host sync**, in the ARP panel, aligns musical independent-arp rates and musical sequence
+frames with the host's PPQ grid. It is on for fresh instances. Patches saved
+before this feature load with it off, preserving their previous chord-start
+behavior. Turn it on explicitly in an existing Logic patch to use transport sync.
+
+- A chord entered between grid boundaries waits for the next boundary.
+- Play starts, seeks, and cycle wraps restart the arp pattern while retaining the
+  physical/latched chord. Swing pairs are anchored at PPQ zero, including preroll.
+- Stop silences generated arp voices, including their tails, while retaining the
+  chord for the next Play. To audition the arp while Logic is stopped, switch
+  **Host sync off**, or select a Seconds rate.
+- **Seconds** remains free-running and independent of host play/stop.
+- Without valid tempo and PPQ, the clock falls back to free-running. The
+  standalone therefore remains playable. The display reports HOST PLAY,
+  HOST STOP, FREE CLOCK, or FREE / NO HOST from the processed clock state.
+- Loop points supplied by the host allow cycle wrapping within an audio buffer;
+  other discontinuities are detected at the next callback. Host timing and tempo
+  are sampled once per callback and extrapolated within it. Tempo ramps are
+  followed at that resolution, rather than claiming sample-accurate tempo events.
+
+**FRAME CLOCK** selects 60 Hz or a musical duration for all three sequence lanes.
+60 Hz keeps the previous note-relative behavior. Musical frames can be quarter,
+eighth, sixteenth, 32nd or 64th notes, or eighth/sixteenth triplets. They use the
+host grid when Host sync is on and the host is playing; otherwise they use the
+selected tempo with a note-relative clock. They do not inherit arp swing.
+
+A new note starts at its first sequence value and advances at the next grid
+boundary. Play/seek/cycle resets held voices' musical-sequence cursors; release
+cursors are retained. While stopped, manual synth notes and sequence release
+tails can finish on their tempo-relative clock. The independent arp itself still
+obeys Host sync's stop behavior. Patch recalls reset normally, and drawing a
+sequence continues to preserve valid cursor progress.
+
+To render an offline chord/arpeggio demo:
+
+```
+cargo run --release --offline --locked --bin rebit-render -- arp.wav pulse --arp
+```
+
+## Sequences
+
+Select the **VOLUME**, **PITCH**, or **DUTY** tab and draw in the grid. Drawing
+creates a 16-step pattern if the lane is empty and enables that lane. Edits are
+heard during playback; the current frame is retained where it remains valid.
+The three switches above the grid enable/disable lanes independently of the tab.
+
+- **STEPS** sets the expanded pattern length (0..65,534); press Return to apply.
+  Growing fills with 15 for volume or 0 for pitch/duty; shrinking truncates values.
+- **LOOP** enables/disables a repeating main section. Drag its marker to move it.
+- **RELEASE** assigns the final four steps as a note-off tail (or creates a tail
+  for a one-step pattern). Drag REL to choose its starting boundary.
+- Arrow buttons page through 16 frames at a time; long patterns remain intact.
+- With the grid focused, Left/Right select a step, Up/Down change it by one unit,
+  Home/End jump to the first/last step, L sets the loop start, and R sets the
+  release boundary at a selected step after the first.
+- Pitch drawing has +/-12, +/-24, and FULL range views. The drawing range is
+  independent of coarse/fine pitch units. Arrow edits support -64..63.
+- The white dot/highlight is an actual Rust engine playhead, following the most
+  recently started active voice. Disabled/finished lanes show no playhead.
+
+The **TEXT** field stays available for the selected lane. Press Return, leave
+the field, or click **APPLY TEXT**. Invalid text retains the last compiled pattern.
+Graphical edits update the text; text edits update the graph. Markers are encoded
+in the same version-1 patch text, so saved patches remain compatible.
+
+Values advance at **FRAME CLOCK**, 60 Hz by default. Examples:
+
+```
+Volume: 15,12,8[4,2]|1,0
+Pitch:  0,4,7[12,7,4]|0
+Duty:   0,1[2,1]|0
+Ramp:   15 to 0 in 10
+Repeat: 15 x 4,8 x 4,0
+```
+
+Volume is 0..15, pitch -64..63, and duty 0..2. Fine pitch units are 1/8 semitone.
+A final `[ ... ]` section loops while held. `|` starts a release section on note
+off (after pedal holds end). Without a loop, the final main value holds. Clearing
+a field clears the lane's data; an enabled empty volume lane produces silence.
+After a release lane finishes, volume becomes silent, pitch returns to zero,
+and duty returns to its parameter setting. Each lane accepts at most 65,534
+expanded frames. Invalid edits keep the last valid sequence.
+
+The grammar deliberately rejects malformed legacy forms, ignored trailing text,
+empty release tails, zero/negative repeats, and overflowing integers. Original
+Rebit/Magical8bitPlug2 presets and DAW states are not imported. Rust patches use
+`RebitRust` version 1 state and cannot overwrite an original plugin instance.
+
+## Changes from the C++ edition
+
+- Deterministic random state belongs to each voice/engine. There is no libc
+  `rand()` and no interaction with other plugin instances.
+- Sequence updates exchange ownership of compiled banks under a try-lock.
+  The callback never waits for the producer and never copies the large sequence
+  arrays. Superseded/retired banks are freed by the control thread. Active
+  sequence cursors retain their progress when a bank is replaced; shortening a
+  pattern clamps main positions, and release offsets are retained where valid.
+- Static pitches cache their increments; per-sample pitch calculations are
+  reserved for active glide, sweep, or vibrato. Sequence ticks and MIDI/parameter
+  changes refresh cached pitches.
+- ADSR decay and release use the selected duration for the amplitude traversed.
+- Mono legato returns to the newest remaining held key. Voice stealing favors
+  released voices, then the oldest; extreme notes receive no special protection.
+- The 96th-note arpeggio clock uses tempo instead of reproducing the original's
+  frame-clock fallback. Tempo changes take effect during playback.
+- Inert legacy parameters and original-state import are omitted.
+
+Sound and timing intentionally differ from the reverse-engineered edition.
+
+## Layout and ownership
+
+- `src/engine.rs`: safe Rust, fixed voice/key storage; no render/MIDI allocation.
+- `src/arpeggiator.rs`: fixed-storage chord handling, patterns, gate/swing clock.
+- `src/transport.rs`: validated host timing and musical frame clock definitions.
+- `src/sequence.rs`: strict bounded compiler and sequence cursor.
+- `src/ffi.rs`: the Rust library's unsafe boundary, opaque C handles.
+- `native/RustEngine.h`: matching C ABI, no Rust structs with unstable layout.
+- `native/PluginProcessor.*`: host adapter, state, and sequence-bank ownership.
+- `native/PluginEditor.*`: adapted JUCE editor.
+- `native/SequenceCanvas.*`: graphical sequence editing and atomic playhead display.
+- `tests/`: Rust regressions, native processor integration, VST3 host, editor preview.
+
+After preparation, only the audio thread accesses the engine. The control thread
+owns the canonical sequence bank under `textMutex`. It publishes a cloned bank
+under `sequenceLock`. The audio callback uses a try-lock to swap that bank with
+its current bank and leaves the retired bank for control-thread reclamation.
+Parsing, cloning, and freeing banks never happen in the callback. Processor
+teardown requires the host to stop callbacks first. Hosts must call state
+serialization/restoration outside realtime processing; these operations allocate.
+The allocation test covers Rust rendering and MIDI, not every JUCE/host code path.
+Release Rust panics abort; a panic is not a recoverable audio-thread error.
+
+## Verification
+
+```
+ctest --test-dir build --output-on-failure
+./build/rebit_rust_preview /tmp/rebit-rust-preview.png
+```
+
+See `VALIDATION.md` for checks performed on this checkout and remaining limits.
+
+## License
+
+AGPL-3.0-or-later, like the original Rebit implementation; see `LICENSE` and
+`THIRD-PARTY.md`. This is an independent instrument, not an official YMCK update.
+# rebit
