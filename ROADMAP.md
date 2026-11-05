@@ -28,11 +28,11 @@ parameter IDs, and version-1 patches; migrate state explicitly when needed.
    - Independent oscillator, tuning, gain/pan, envelope, and sequences.
    - Pulse + triangle sub, melodic + noise, detune and stereo combinations.
    - Voice/CPU budget and migration from single-layer patches.
-7. **Raw and Clean sound modes — next**
+7. **Raw and Clean sound modes — completed and installed**
    - Preserve raw chip sound; offer reduced-aliasing oscillators.
    - Optional saturation, bit-depth and sample-rate reduction, with bypass.
    - Compare CPU and spectra; avoid an unmeasured performance claim.
-8. **Modulation and expression — planned**
+8. **Modulation and expression — next**
    - Velocity, wheel, aftertouch, and LFO routing; performance macros.
    - Pulse width, pitch, layer balance, and effects destinations.
    - Add MPE as a later part of this milestone, including the JUCE MIDI bridge.
@@ -124,3 +124,23 @@ stereo demo is `dist/rebit-rust-layers-demo.wav`.
 The installed AU signature and executable hash verify, and Apple AU validation
 passes. The previous Rust component is backed up. Restart Logic, turn B on, and
 use EDIT A / EDIT B to choose the sound/sequence controls. Milestone 7 is next.
+
+## Milestone 7 delivery
+
+Completed 2026-11-05. Raw/Clean is selectable per layer, with 5 ms transitions.
+Clean uses polynomial pulse-edge and triangle-corner correction; noise is kept
+unchanged. Added shared saturation, bit-depth reduction, stereo-linked sample
+hold and dry/wet with bypass. Neutral/bypassed settings preserve dry output.
+Three previous-build pulse/noise/layered demo WAVs remain byte-identical.
+
+96 Rust tests, Clippy and all four CTest groups pass, including actual AU/VST3
+Clean/effect rendering. Coherent actual-engine spectra show roughly 16–40 dB
+lower alias-to-harmonic ratios in the tested cases; results, limitations and
+offline throughput comparisons are in VALIDATION.md and `dist/quality-analysis`.
+An eight-second comparison is `dist/rebit-rust-colour-demo.wav`.
+
+Version-3 patches save the new controls. Version-1/2 patches migrate to Raw and
+FX bypass while preserving their established layer/state migration. The AU is
+installed with a verified signature/hash and passes Apple AU validation; the
+prior Rust AU is backed up. Restart Logic, select SOUND MODE per layer, and turn
+FX on to use the master chain. Modulation and expression is next.

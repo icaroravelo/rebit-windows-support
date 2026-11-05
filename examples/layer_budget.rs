@@ -1,14 +1,19 @@
 //! Offline throughput check, not a realtime scheduling guarantee.
+use rebit_rust::effects::EffectsParameters;
 use rebit_rust::{
     layers::{LayerMix, LayerMixer},
     Engine, Parameters,
 };
 use std::{hint::black_box, time::Instant};
 fn main() {
-    for (label, voices, dual, dynamic) in [
-        ("A: 8 static", 8, false, false),
-        ("A+B: 8 each static", 8, true, false),
-        ("A+B: 64 each + vibrato", 64, true, true),
+    for (label, voices, dual, dynamic, clean, fx) in [
+        ("A Raw: 8 static", 8, false, false, false, false),
+        ("A Clean: 8 static", 8, false, false, true, false),
+        ("A+B Raw: 8 each", 8, true, false, false, false),
+        ("A+B Clean: 8 each", 8, true, false, true, false),
+        ("A+B Raw: 64 each + vibrato", 64, true, true, false, false),
+        ("A+B Clean: 64 each + vibrato", 64, true, true, true, false),
+        ("A+B Clean: 8 each + all FX", 8, true, false, true, true),
     ] {
         let mut times = Vec::new();
         for _ in 0..3 {
@@ -26,6 +31,17 @@ fn main() {
             a.set_parameters(p);
             b.set_parameters(p);
             b.set_tuning(-12.07);
+            a.set_sound_mode(i32::from(clean));
+            b.set_sound_mode(i32::from(clean));
+            if fx {
+                m.set_effects(EffectsParameters {
+                    enabled: 1,
+                    drive_db: 12.,
+                    bits: 8.,
+                    rate_divider: 6.,
+                    mix: 0.7,
+                });
+            }
             if dual {
                 m.set_mix(1, LayerMix::default());
             }

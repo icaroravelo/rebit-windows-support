@@ -26,7 +26,8 @@ legacy one-voice modes; glide is available there with Arp off. Colours
 separate oscillator, amplitude, performance, modulation, and sequence controls.
 
 See `preview.png` for the default patch, `preview-showcase.png` for a populated
-patch, `preview-layer-b.png` for B's controls, and `preview-clipping.png` for
+patch, `preview-layer-b.png` for B's controls, `preview-colour.png` for Clean/FX,
+and `preview-clipping.png` for
 output above full scale with a releasing voice. All are rendered from the actual editor and audio processor; preview
 patches do not change defaults.
 
@@ -61,10 +62,11 @@ The editor is now 1320x930, with the layer controls in a side panel. Invalid
 sequence drafts must be corrected before switching layers. Each layer's bank
 and playhead stay separate; editing B does not change A's sequence text.
 
-New patches use state **version 2**. Version-1 Rust patches load into A with
+New patches use state **version 3**. Version-1 Rust patches load into A with
 unity layer level, center pan and zero added tuning; B is explicitly disabled
-and cleared. Existing parameter IDs and plugin identity are retained. New states
-need this build or later; earlier builds reject version 2.
+and cleared. Version-2 patches retain both layers. Both old formats load in Raw
+with effects off. Existing parameter IDs and plugin identity are retained. New
+states need this build or later; earlier builds reject version 3.
 
 An offline stereo example is `dist/rebit-rust-layers-demo.wav`. Reproduce it with:
 
@@ -77,10 +79,51 @@ even when muted. Both engines and the mixer are preallocated. For a reproducible
 offline processing-cost check, use `cargo run --release --offline --locked
 --example layer_budget`; local results and limits are recorded in VALIDATION.md.
 
+### Raw / Clean and master effects
+
+Choose **EDIT A / EDIT B**, then **SOUND MODE → Clean** to reduce oscillator
+aliasing on that layer. **Raw** keeps the original pulse, stepped triangle and
+noise. Clean smooths pulse edges and uses a continuous triangle with corrected
+corners; noise remains unchanged. Switching blends over 5 ms without restarting
+held voices or sequences. High notes can sound rounder/quieter in Clean.
+
+Clean reduces oscillator aliasing rather than removing all possible aliasing:
+discrete sequence changes, note gates, noise and optional effects can still
+produce high-frequency content. The waveform display remains an illustrative
+parameter preview. Measurement plots and limits are in
+`dist/quality-analysis/spectra.svg` and VALIDATION.md.
+
+**FX on** enables the shared output chain for both layers:
+
+- **DRIVE:** 0–24 dB normalized soft saturation; 0 dB is neutral.
+- **BITS:** 4–24-bit quantization; 24 bypasses quantization.
+- **RATE DIV:** stereo-linked sample-and-hold, 1–32 host samples per capture.
+  1x is neutral; 8x at a 48 kHz host gives a 6 kHz capture rate.
+- **MIX:** 0–100% processed sound. FX off returns dry audio after a short fade.
+
+The order is saturation → sample hold → quantization → dry/wet blend, after
+layer mixing/MASTER and any mono downmix, before the output meter. Controls and
+bypass transitions use 5 ms ramps. Quantization and held-sample edges are
+intentional. These effects add colour and can add aliasing even with Clean
+oscillators; they are not an output limiter. Saturation can raise output level.
+
+Sample hold may retain the last sample for up to 31 host samples after an
+ordinary zero-release note-off. STOP, All Sound Off and a host-synced arp stop
+clear its history immediately. There is no lookahead or block-buffering delay.
+Effects are bypassed by default, and neutral FX settings preserve the dry signal.
+
+`dist/rebit-rust-colour-demo.wav` compares the same phrase in four two-second
+sections: Raw, Clean, Clean+saturation, and Clean+8-bit/8x reduction. Reproduce:
+
+```
+cargo run --release --offline --locked --example colour_demo
+```
+
 ### Playback feedback
 
 The top-right **OUTPUT** meter measures the larger absolute stereo sample after
-both layers' levels, pans and MASTER, before the DAW's fader or downstream effects. It shows sample peaks in
+both layers' levels, pans, MASTER and colour effects, before the DAW's fader or
+downstream effects. It shows sample peaks in
 dBFS, from -60 to +6 dB on the bar, with instantaneous attack and 24 dB/second
 falloff. The white marker and numeric value hold the peak for one second before
 falling. Silence reads **-INF dBFS**. This is a sample-peak meter, not a true-peak
@@ -171,7 +214,8 @@ Select **1 voice** with **Arp off** for the legacy mono/glide modes. Voice-count
 and mono-mode changes retain physically held keys and controller state. With
 the independent arp on, the held chord and current generated note survive those
 changes. Pitch is capped below Nyquist for extreme
-notes/modulation; this lo-fi oscillator implementation is not bandlimited.
+notes/modulation. Raw oscillators are not bandlimited; Clean reduces aliasing
+with polynomial edge/corner correction.
 
 ### Live changes
 
@@ -303,7 +347,7 @@ The three switches above the grid enable/disable lanes independently of the tab.
 The **TEXT** field stays available for the selected lane. Press Return, leave
 the field, or click **APPLY TEXT**. Invalid text retains the last compiled pattern.
 Graphical edits update the text; text edits update the graph. Markers are encoded
-in the existing sequence text grammar; version-2 state stores both banks.
+in the existing sequence text grammar; version-3 state stores both banks.
 
 Values advance at **FRAME CLOCK**, 60 Hz by default. Examples:
 
@@ -326,7 +370,7 @@ expanded frames. Invalid edits keep the last valid sequence.
 The grammar deliberately rejects malformed legacy forms, ignored trailing text,
 empty release tails, zero/negative repeats, and overflowing integers. Original
 Rebit/Magical8bitPlug2 presets and DAW states are not imported. Rust patches use
-`RebitRust` version 2 state, with version-1 migration, and cannot overwrite an
+`RebitRust` version 3 state, with version-1/2 migration, and cannot overwrite an
 original plugin instance.
 
 ## Changes from the C++ edition
@@ -358,6 +402,8 @@ Sound and timing intentionally differ from the reverse-engineered edition.
 - `src/smoothing.rs`: sample-counted ramps and three-way oscillator crossfades.
 - `src/meter.rs`: output sample peaks, peak hold/decay, and clip-event revision.
 - `src/layers.rs`: preallocated two-engine stereo mixer, layer fades and output metering.
+- `src/oscillator.rs`: Clean pulse/triangle polynomial edge/corner correction.
+- `src/effects.rs`: bypassable shared saturation, hold and quantization chain.
 - `src/sequence.rs`: strict bounded compiler and sequence cursor.
 - `src/ffi.rs`: the Rust library's unsafe boundary, opaque C handles.
 - `native/RustEngine.h`: matching C ABI, no Rust structs with unstable layout.

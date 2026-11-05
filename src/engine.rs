@@ -204,6 +204,7 @@ struct Tail {
     wave: [f64; 3],
     duty: [f64; 3],
     algorithms: [f64; 3],
+    clean: f64,
     channel: u8,
     arpeggiated: bool,
 }
@@ -219,6 +220,7 @@ impl Default for Tail {
             wave: [1., 0., 0.],
             duty: [1., 0., 0.],
             algorithms: [1., 0., 0.],
+            clean: 0.,
             channel: 0,
             arpeggiated: false,
         }
@@ -232,6 +234,8 @@ struct Key {
 pub struct Engine {
     params: Parameters,
     tuning: f64,
+    sound_mode: i32,
+    clean: Ramp,
     meter: Meter,
     voices: [Voice; MAX_VOICES],
     tails: [Tail; MAX_VOICES],
@@ -267,6 +271,8 @@ impl Engine {
         let mut engine = Self {
             params: Parameters::default(),
             tuning: 0.,
+            sound_mode: 0,
+            clean: Ramp::new(0.),
             meter: Meter::default(),
             voices: [Voice::default(); MAX_VOICES],
             tails: [Tail::default(); MAX_VOICES],
@@ -306,6 +312,7 @@ impl Engine {
     }
     pub fn reset(&mut self) {
         self.meter.reset();
+        self.clean.reset(self.sound_mode as f64);
         self.voices.fill(Voice::default());
         self.tails.fill(Tail::default());
         self.snap_parameters();
@@ -429,6 +436,7 @@ impl Engine {
             wave: self.wave.current(),
             duty: voice.last_duty,
             algorithms: self.algorithms.current(),
+            clean: self.clean.current,
             channel: voice.channel,
             arpeggiated: voice.arpeggiated,
         };
@@ -523,6 +531,22 @@ impl Engine {
     }
     pub fn parameters(&self) -> Parameters {
         self.params
+    }
+    /// Raw is the legacy oscillator. Clean fades in polynomial edge correction.
+    pub fn set_sound_mode(&mut self, mode: i32) {
+        let mode = mode.clamp(0, 1);
+        if mode == self.sound_mode {
+            return;
+        }
+        self.sound_mode = mode;
+        if self.active_voices() > 0 || self.tails.iter().any(|t| t.remaining > 0) {
+            self.clean.target(mode as f64, self.transition_samples());
+        } else {
+            self.clean.reset(mode as f64);
+        }
+    }
+    pub fn sound_mode(&self) -> i32 {
+        self.sound_mode
     }
     pub fn set_tuning(&mut self, semitones: f64) {
         let tuning = if semitones.is_finite() {
@@ -1252,6 +1276,7 @@ impl Engine {
             let gain = self.gain.next() as f32;
             p.sustain = self.sustain_level.next() as f32;
             let wave = self.wave.next();
+            let clean = self.clean.next();
             let manual_duty = self.duty.next();
             let algorithms = self.algorithms.next();
             let duty_sequence = self.duty_sequence.next();
@@ -1349,7 +1374,6 @@ impl Engine {
                 }
                 v.last_amplitude = amplitude;
                 v.last_duty = duty;
-                sum += oscillator(v.phase, &v.noise, wave, duty, algorithms) * amplitude as f32;
                 let dynamic = v.glide != 0.
                     || (p.sweep_initial != 0. && v.time < p.sweep_time as f64)
                     || (p.vibrato_depth > 0. && v.time >= p.vibrato_delay as f64);
@@ -1370,6 +1394,8 @@ impl Engine {
                     (v.increment * (correction / 12.).exp2()).min(0.49)
                 };
                 v.last_increment = increment;
+                sum += oscillator(v.phase, &v.noise, wave, duty, algorithms, increment, clean)
+                    * amplitude as f32;
                 advance_oscillator(&mut v.phase, &mut v.noise, increment, wave, algorithms);
                 let sweep_ended = p.sweep_initial != 0.
                     && v.time < p.sweep_time as f64
@@ -1423,6 +1449,8 @@ impl Engine {
                     tail.wave,
                     tail.duty,
                     tail.algorithms,
+                    tail.increment,
+                    tail.clean,
                 ) * (tail.amplitude * (tail.remaining - 1) as f64 / tail.length as f64)
                     as f32;
                 advance_oscillator(
@@ -1459,6 +1487,8 @@ fn oscillator(
     wave: [f64; 3],
     duty: [f64; 3],
     algorithms: [f64; 3],
+    increment: f64,
+    clean: f64,
 ) -> f32 {
     let pulse: f64 = duty
         .iter()
@@ -1471,7 +1501,30 @@ fn oscillator(
         .zip(algorithms)
         .map(|(n, weight)| n.sample as f64 * weight)
         .sum();
-    (pulse * wave[0] + triangle as f64 * wave[1] + random * wave[2]) as f32
+    let raw = (pulse * wave[0] + triangle as f64 * wave[1] + random * wave[2]) as f32;
+    if clean == 0. {
+        return raw;
+    }
+    let clean_pulse: f64 = if wave[0] == 0. {
+        0.
+    } else {
+        duty.iter()
+            .zip([0.125, 0.25, 0.5])
+            .filter(|(weight, _)| **weight != 0.)
+            .map(|(weight, width)| weight * crate::oscillator::clean_pulse(phase, increment, width))
+            .sum()
+    };
+    let clean_tri = if wave[1] == 0. {
+        0.
+    } else {
+        crate::oscillator::clean_triangle(phase, increment)
+    };
+    let corrected = (clean_pulse * wave[0] + clean_tri * wave[1] + random * wave[2]) as f32;
+    if clean == 1. {
+        corrected
+    } else {
+        raw + (corrected - raw) * clean as f32
+    }
 }
 fn advance_oscillator(
     phase: &mut f64,
@@ -2501,5 +2554,82 @@ mod tuning_tests {
         e.set_tuning(f64::NAN);
         e.render(&mut [0.; 240]);
         assert!((e.voices[0].last_increment - 440. / 48000.).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    #[test]
+    fn raw_clean_transition_keeps_voice_phase_and_finishes_in_five_ms() {
+        let mut e = Engine::new(8000., 1);
+        e.midi(0x90, 60, 127);
+        e.render(&mut [0.; 100]);
+        let phase = e.voices[0].phase;
+        let time = e.voices[0].time;
+        e.set_sound_mode(1);
+        assert_eq!(e.voices[0].phase, phase);
+        assert_eq!(e.voices[0].time, time);
+        e.render(&mut [0.; 20]);
+        assert!((e.clean.current - 0.5).abs() < 1e-12);
+        e.render(&mut [0.; 20]);
+        assert_eq!(e.clean.current, 1.);
+        assert_eq!(e.active_voices(), 1);
+        e.midi(0x80, 60, 0);
+        let mut output = [1.; 16];
+        e.render(&mut output);
+        assert_eq!(output, [0.; 16]);
+        e.reset();
+        assert_eq!(e.clean.current, 1.);
+        e.set_sound_mode(0);
+        assert_eq!(e.clean.current, 0.);
+    }
+    #[test]
+    fn noise_is_identical_in_both_modes() {
+        for algorithm in 0..3 {
+            let mut raw = Engine::new(48000., 123);
+            let mut clean = Engine::new(48000., 123);
+            for e in [&mut raw, &mut clean] {
+                e.set_parameters(Parameters {
+                    osc: 2,
+                    noise_algorithm: algorithm,
+                    ..Default::default()
+                });
+                e.midi(0x90, 60, 100);
+            }
+            clean.set_sound_mode(1);
+            clean.render(&mut [0.; 240]);
+            raw.render(&mut [0.; 240]);
+            let mut a = [0.; 4096];
+            let mut b = [0.; 4096];
+            raw.render(&mut a);
+            clean.render(&mut b);
+            assert_eq!(a, b);
+        }
+    }
+    #[test]
+    fn switching_back_to_raw_keeps_the_original_oscillator_phase() {
+        for osc in 0..2 {
+            let mut raw = Engine::new(48000., 1);
+            let mut other = Engine::new(48000., 1);
+            for e in [&mut raw, &mut other] {
+                e.set_parameters(Parameters {
+                    osc,
+                    ..Default::default()
+                });
+                e.midi(0x90, 69, 127);
+            }
+            other.set_sound_mode(1);
+            raw.render(&mut [0.; 500]);
+            other.render(&mut [0.; 500]);
+            other.set_sound_mode(0);
+            raw.render(&mut [0.; 240]);
+            other.render(&mut [0.; 240]);
+            let mut a = [0.; 256];
+            let mut b = [0.; 256];
+            raw.render(&mut a);
+            other.render(&mut b);
+            assert_eq!(a, b);
+        }
     }
 }

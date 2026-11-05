@@ -7,6 +7,8 @@ struct RustSequenceBank;
 struct RustLayerMixer;
 struct RustLayerMix { int32_t enabled; float gain,pan; };
 static_assert(sizeof(RustLayerMix)==12 && std::is_standard_layout_v<RustLayerMix>);
+struct RustEffectsParameters {int32_t enabled;float drive_db,bits,rate_divider,mix;};
+static_assert(sizeof(RustEffectsParameters)==20 && std::is_standard_layout_v<RustEffectsParameters>);
 struct RustParameters {
     int32_t osc, duty, noise_algorithm, max_poly, behavior, interval_type, pitch_mode;
     float gain, attack, decay, sustain, release, portamento, bend_range, vibrato_period,
@@ -35,10 +37,13 @@ extern "C" {
 RustEngine* rebit_engine_new();
 RustEngine* rebit_engine_new_seeded(uint32_t);
 void rebit_engine_tuning(RustEngine*,double);
+void rebit_engine_sound_mode(RustEngine*,int32_t);
 RustLayerMixer* rebit_mixer_new();
 void rebit_mixer_free(RustLayerMixer*);
 void rebit_mixer_prepare(RustLayerMixer*,double);
 void rebit_mixer_reset(RustLayerMixer*);
+void rebit_mixer_effects(RustLayerMixer*,const RustEffectsParameters*);
+void rebit_mixer_clear_effects(RustLayerMixer*);
 void rebit_mixer_parameters(RustLayerMixer*,size_t,const RustLayerMix*);
 // Distinct engines/output buffers; right==nullptr selects an averaged mono mix.
 void rebit_mixer_render(RustLayerMixer*,RustEngine*,RustEngine*,float* left,float* right,size_t);

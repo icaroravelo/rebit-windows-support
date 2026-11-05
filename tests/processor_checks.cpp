@@ -7,9 +7,47 @@
 #include <thread>
 #include <stdexcept>
 static void require(bool condition,const char* message) {if(!condition)throw std::runtime_error(message);}
+template<class T> static T* control(juce::Component& root,const juce::String& name){
+    if(root.getName()==name)if(auto* found=dynamic_cast<T*>(&root))return found;
+    for(auto* child:root.getChildren())if(auto* found=control<T>(*child,name))return found;
+    return nullptr;
+}
 int main() {
     try {
         juce::ScopedJuceInitialiser_GUI init;
+        {
+            RebitProcessor colour;
+            auto set=[&](const char* id,float value){auto* p=colour.state.getParameter(id);require(p!=nullptr,"Missing colour parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};
+            set("fxEnabled",1);set("fxDrive",12);set("fxBits",4);set("fxRate",32);
+            colour.prepareToPlay(8000,128);juce::AudioBuffer<float> audio(2,128);juce::MidiBuffer events;
+            events.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);colour.processBlock(audio,events);
+            require(audio.getMagnitude(0,128)>.5f,"Colour effects did not reach rendered output");
+            require(std::abs(colour.playbackInfo().heldPeak-audio.getMagnitude(0,128))<1e-6f,"Meter did not follow colour output");
+            events.addEvent(juce::MidiMessage::allSoundOff(1),3);colour.processBlock(audio,events);
+            for(int i=3;i<128;++i)require(audio.getSample(0,i)==0.f,"All Sound Off left sample-hold audio behind");
+            set("fxEnabled",0);colour.processBlock(audio,events);events.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);colour.processBlock(audio,events);
+            require(std::abs(audio.getSample(0,0)+.5f)<1e-6f,"Effects bypass changed Raw output");
+            auto editor=std::unique_ptr<juce::AudioProcessorEditor>(colour.createEditor());
+            auto* mode=control<juce::ComboBox>(*editor,"Layer sound mode");auto* editB=control<juce::TextButton>(*editor,"Edit layer B");
+            auto* enabled=control<juce::ToggleButton>(*editor,"Effects enabled");require(mode&&editB&&enabled,"Colour editor controls missing");
+            mode->setSelectedItemIndex(1,juce::sendNotificationSync);require(colour.state.getRawParameterValue("layerASoundMode")->load()>.5f&&colour.state.getRawParameterValue("layerBSoundMode")->load()<.5f,"A sound mode edit routed incorrectly");
+            editB->onClick();require(mode->getSelectedItemIndex()==0,"B inherited A sound mode attachment");mode->setSelectedItemIndex(1,juce::sendNotificationSync);
+            enabled->setToggleState(true,juce::sendNotificationSync);require(colour.state.getRawParameterValue("fxEnabled")->load()>.5f,"FX switch did not reach processor");
+            set("layerBEnabled",1);juce::MemoryBlock modern;colour.getStateInformation(modern);set("fxEnabled",0);set("layerASoundMode",0);
+            colour.setStateInformation(modern.getData(),(int)modern.getSize());require(colour.state.getRawParameterValue("fxEnabled")->load()>.5f&&colour.state.getRawParameterValue("layerASoundMode")->load()>.5f&&colour.state.getRawParameterValue("layerBSoundMode")->load()>.5f,"Version-3 colour settings did not round-trip");
+            juce::XmlElement old("RebitRust");old.setAttribute("version",2);old.addChildElement(colour.state.copyState().createXml().release());old.createNewChildElement("layerB")->createNewChildElement("pitch")->addTextElement("[0,12]");
+            juce::MemoryBlock legacy;juce::AudioProcessor::copyXmlToBinary(old,legacy);colour.setStateInformation(legacy.getData(),(int)legacy.getSize());
+            require(colour.state.getRawParameterValue("fxEnabled")->load()<.5f&&colour.state.getRawParameterValue("layerASoundMode")->load()<.5f&&colour.state.getRawParameterValue("layerBSoundMode")->load()<.5f,"Version-2 patch inherited Clean/effects settings");
+            require(colour.state.getRawParameterValue("layerBEnabled")->load()>.5f&&colour.sequenceText(1,1)=="[0,12]","Colour migration lost legacy B state");
+        }
+        {
+            TestPlayHead host;host.set(0.,120.,true);RebitProcessor stopped;stopped.setPlayHead(&host);
+            for(const auto* id:{"arpEnabled","fxEnabled"})stopped.state.getParameter(id)->setValueNotifyingHost(1.f);
+            auto* rate=stopped.state.getParameter("fxRate");rate->setValueNotifyingHost(rate->convertTo0to1(32));
+            stopped.prepareToPlay(8000,128);juce::AudioBuffer<float> audio(2,128);juce::MidiBuffer events;
+            events.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);stopped.processBlock(audio,events);require(audio.getMagnitude(0,128)>.49f,"Host-stop effect workload was silent");
+            host.set(.032,120.,false);stopped.processBlock(audio,events);require(audio.getMagnitude(0,128)==0.f,"Host stop left held effect samples playing");
+        }
         {
             RebitProcessor layers;
             auto set=[&](const char* id,float value){auto* p=layers.state.getParameter(id);require(p!=nullptr,"Missing layer parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};

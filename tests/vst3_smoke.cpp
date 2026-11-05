@@ -43,6 +43,12 @@ int main(int argc,char** argv) {
     plugin->prepareToPlay(8000,128);buffer.setSize(2,128);midi.clear();midi.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);
     plugin->processBlock(buffer,midi);
     if(std::abs(buffer.getSample(0,0)+.5f)>1e-6f||std::abs(buffer.getSample(1,0)+8.f/15.f)>1e-6f){std::cerr<<"VST3 stereo layer routing failed\n";return 1;}
+    plugin->releaseResources();
+    if(!set("Layer B enabled",0)||!set("Layer A pan",.5f)||!set("Layer A sound mode",1)||!set("Effects enabled",1)||!set("Saturation drive",.5f)||!set("Bit depth",.2f)||!set("Rate divider",7.f/31.f))return 1;
+    plugin->prepareToPlay(8000,128);midi.clear();midi.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);plugin->processBlock(buffer,midi);
+    for(int i=0;i<8;++i)if(std::abs(buffer.getSample(0,i))>1e-7f){std::cerr<<"VST3 Clean edge/sample hold failed\n";return 1;}
+    if(std::abs(buffer.getSample(0,8))<.5f){std::cerr<<"VST3 effects produced no saturation\n";return 1;}
+    for(int i=8;i<16;++i)if(std::abs(buffer.getSample(0,i)-buffer.getSample(0,8))>1e-7f)return 1;
     plugin->setPlayHead(nullptr);plugin->releaseResources();
     std::cout<<"VST3 discovery, instantiation, MIDI, stereo render, state recall, host PPQ/start-stop: passed\n";
 }

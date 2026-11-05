@@ -1,5 +1,6 @@
 //! Two bounded engines, stereo balance and output metering. Default layer A is
 //! unity/centre and B is dormant, preserving the single-layer signal exactly.
+use crate::effects::{Effects, EffectsParameters};
 use crate::meter::Meter;
 use crate::smoothing::Ramp;
 use crate::{Engine, PlaybackInfo};
@@ -43,6 +44,7 @@ impl MixState {
 pub struct LayerMixer {
     mix: [MixState; 2],
     meter: Meter,
+    effects: Effects,
     rate: f64,
     running_b: bool,
     sounding: bool,
@@ -59,6 +61,7 @@ impl Default for LayerMixer {
                 }),
             ],
             meter: Meter::default(),
+            effects: Effects::default(),
             rate: 44100.,
             running_b: false,
             sounding: false,
@@ -73,15 +76,23 @@ impl LayerMixer {
             44100.
         };
         self.meter.prepare(self.rate);
+        self.effects.prepare(self.rate);
         self.reset();
     }
     pub fn reset(&mut self) {
         self.meter.reset();
+        self.effects.reset();
         self.running_b = false;
         self.sounding = false;
         for state in &mut self.mix {
             *state = MixState::new(state.settings);
         }
+    }
+    pub fn set_effects(&mut self, parameters: EffectsParameters) {
+        self.effects.set_parameters(parameters, self.sounding);
+    }
+    pub fn clear_effects_history(&mut self) {
+        self.effects.clear_history();
     }
     pub fn set_mix(&mut self, layer: usize, mut settings: LayerMix) {
         let Some(state) = self.mix.get_mut(layer) else {
@@ -198,6 +209,7 @@ impl LayerMixer {
                     let sample = (channels[0] + channels[1]) * 0.5;
                     channels = [sample, sample];
                 }
+                channels = self.effects.process(channels);
                 l[i] = channels[0];
                 r[i] = channels[1];
                 self.meter.observe(l[i].abs().max(r[i].abs()));
@@ -209,7 +221,8 @@ impl LayerMixer {
         }
         self.sounding = first.active_voices() > 0
             || (self.running_b && second.active_voices() > 0)
-            || self.playback(first, second).fading > 0;
+            || self.playback(first, second).fading > 0
+            || self.effects.has_tail();
     }
 }
 
@@ -534,5 +547,69 @@ mod tests {
         }
         m.render(&mut a, &mut b, &mut l, &mut r);
         assert!(l.iter().chain(&r).all(|x| *x == 0.));
+    }
+}
+
+#[cfg(test)]
+mod colour_tests {
+    use super::*;
+    #[test]
+    fn bypass_fades_when_only_a_sample_hold_tail_remains() {
+        let mut a = Engine::new(8000., 1);
+        let mut b = Engine::new(8000., 2);
+        let mut m = LayerMixer::default();
+        m.prepare(8000.);
+        let fx = EffectsParameters {
+            enabled: 1,
+            rate_divider: 32.,
+            ..Default::default()
+        };
+        m.set_effects(fx);
+        a.midi(0x90, 0, 127);
+        m.render(&mut a, &mut b, &mut [0.; 10], &mut [0.; 10]);
+        a.midi(0x80, 0, 0);
+        let mut l = [0.; 1];
+        let mut r = [0.; 1];
+        m.render(&mut a, &mut b, &mut l, &mut r);
+        assert_eq!(a.active_voices(), 0);
+        assert_ne!(l[0], 0.);
+        m.set_effects(EffectsParameters { enabled: 0, ..fx });
+        m.render(&mut a, &mut b, &mut l, &mut r);
+        assert_ne!(l[0], 0.);
+        m.render(&mut a, &mut b, &mut [0.; 40], &mut [0.; 40]);
+        m.render(&mut a, &mut b, &mut l, &mut r);
+        assert_eq!(l, [0.]);
+    }
+    #[test]
+    fn output_meter_observes_effects_and_bypass_preserves_raw_output() {
+        let mut a = Engine::new(8000., 1);
+        let mut b = Engine::new(8000., 2);
+        let mut m = LayerMixer::default();
+        m.prepare(8000.);
+        m.set_effects(EffectsParameters {
+            enabled: 1,
+            drive_db: 6.,
+            bits: 4.,
+            rate_divider: 4.,
+            mix: 1.,
+        });
+        a.midi(0x90, 0, 127);
+        let mut l = [0.; 16];
+        let mut r = [0.; 16];
+        m.render(&mut a, &mut b, &mut l, &mut r);
+        let peak = l.iter().chain(&r).map(|x| x.abs()).fold(0_f32, f32::max);
+        assert!(peak > 0.5);
+        assert_eq!(m.playback(&a, &b).held_peak, peak);
+        assert_eq!(l, r);
+        m.set_effects(EffectsParameters {
+            enabled: 0,
+            drive_db: 24.,
+            bits: 4.,
+            rate_divider: 32.,
+            mix: 1.,
+        });
+        m.render(&mut a, &mut b, &mut [0.; 40], &mut [0.; 40]);
+        m.render(&mut a, &mut b, &mut l, &mut r);
+        assert!(l.iter().all(|x| x.abs() == 0.5));
     }
 }

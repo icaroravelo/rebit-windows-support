@@ -42,6 +42,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout RebitProcessor::layout() {
     number("layerBSustain","Layer B sustain",0,1,1,1,.01f);number("layerBRelease","Layer B release",0,5,0,.5f,.001f);
     boolean("layerBVolumeEnabled","Layer B volume sequence");boolean("layerBPitchEnabled","Layer B pitch sequence");boolean("layerBDutyEnabled","Layer B duty sequence");
     choice("layerBPitchMode","Layer B pitch units",{"Coarse","Fine"});
+    choice("layerASoundMode","Layer A sound mode",{"Raw","Clean"});choice("layerBSoundMode","Layer B sound mode",{"Raw","Clean"});
+    boolean("fxEnabled","Effects enabled");number("fxDrive","Saturation drive",0,24,0,1,.1f);
+    number("fxBits","Bit depth",4,24,24,1,1);number("fxRate","Rate divider",1,32,1,1,1);
+    number("fxMix","Effects mix",0,100,100,1,1);
     return l;
 }
 RebitProcessor::RebitProcessor()
@@ -99,11 +103,16 @@ void RebitProcessor::readParameters(bool readTransport) {
         rebit_engine_parameters(engine,layer==0?&p:&b,transport.bpm);
         rebit_engine_clock_parameters(engine,&clocks);rebit_engine_transport(engine,&transport);
     }
+    rebit_engine_sound_mode(engines[0],(int)value("layerASoundMode"));
+    rebit_engine_sound_mode(engines[1],(int)value("layerBSoundMode"));
     rebit_engine_tuning(engines[0],value("layerATranspose")+value("layerADetune")*.01);
     rebit_engine_tuning(engines[1],value("layerBTranspose")+value("layerBDetune")*.01);
     const RustLayerMix mixA{value("layerAEnabled")>.5f?1:0,value("layerAGain"),value("layerAPan")};
     const RustLayerMix mixB{value("layerBEnabled")>.5f?1:0,value("layerBGain"),value("layerBPan")};
     rebit_mixer_parameters(mixer,0,&mixA);rebit_mixer_parameters(mixer,1,&mixB);
+    const RustEffectsParameters fx{value("fxEnabled")>.5f?1:0,value("fxDrive"),value("fxBits"),value("fxRate"),value("fxMix")*.01f};
+    rebit_mixer_effects(mixer,&fx);
+    if(transport.valid!=0&&transport.playing==0&&clocks.host_sync!=0&&arp.enabled!=0&&arp.rate!=15)rebit_mixer_clear_effects(mixer);
 }
 void RebitProcessor::prepareToPlay(double sr,int) {
     preparedSampleRate=std::isfinite(sr)?std::clamp(sr,8000.,384000.):44100.;
@@ -135,6 +144,7 @@ PlaybackSnapshot RebitProcessor::playbackInfo() const {
 bool RebitProcessor::isBusesLayoutSupported(const BusesLayout& l) const {return l.getMainInputChannelSet().isDisabled()&&(l.getMainOutputChannelSet()==juce::AudioChannelSet::mono()||l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo());}
 void RebitProcessor::midi(const juce::MidiMessage& m) {
     const auto* data=m.getRawData();const int n=m.getRawDataSize();
+    if(n>2&&(data[0]&0xf0)==0xb0&&data[1]==120)rebit_mixer_clear_effects(mixer);
     if(n>0)for(auto* engine:engines)rebit_engine_midi(engine,data[0],n>1?data[1]:0,n>2?data[2]:0);
 }
 void RebitProcessor::processBlock(juce::AudioBuffer<float>& buffer,juce::MidiBuffer& messages) {
@@ -201,7 +211,7 @@ juce::String RebitProcessor::setSequenceText(int lane,const juce::String& text,i
     rebit_bank_free(publication);texts[index][(size_t)lane]=text;++sequenceVersion[index];return {};
 }
 void RebitProcessor::getStateInformation(juce::MemoryBlock& out) {
-    const juce::ScopedLock lock(textMutex);auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",2);
+    const juce::ScopedLock lock(textMutex);auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",3);
     xml->addChildElement(state.copyState().createXml().release());const char* names[]={"volume","pitch","duty"};
     for(size_t layer=0;layer<2;++layer){
         auto* node=layer==0?xml.get():xml->createNewChildElement("layerB");
@@ -211,14 +221,14 @@ void RebitProcessor::getStateInformation(juce::MemoryBlock& out) {
 }
 void RebitProcessor::setStateInformation(const void* data,int size) {
     auto xml=getXmlFromBinary(data,size);if(!xml||!xml->hasTagName("RebitRust"))return;
-    const int version=xml->getIntAttribute("version");if(version!=1&&version!=2)return;
+    const int version=xml->getIntAttribute("version");if(version!=1&&version!=2&&version!=3)return;
     auto* params=xml->getChildByName("RebitRustParams");if(!params)return;
     const juce::ScopedLock textLock(textMutex);
     std::array<RustSequenceBank*,2> next{{rebit_bank_new(),rebit_bank_new()}};
     std::array<std::array<juce::String,3>,2> restored;
     const char* names[]={"volume","pitch","duty"};
     for(size_t layer=0;layer<2;++layer)for(size_t lane=0;lane<3;++lane){
-        auto* node=layer==0?xml.get():version==2?xml->getChildByName("layerB"):nullptr;
+        auto* node=layer==0?xml.get():version>=2?xml->getChildByName("layerB"):nullptr;
         auto* child=node?node->getChildByName(names[lane]):nullptr;restored[layer][lane]=child?child->getAllSubText():juce::String{};
         const auto utf8=restored[layer][lane].toUTF8();uint8_t error[256]{};
         if(!rebit_bank_set(next[layer],lane,reinterpret_cast<const uint8_t*>(utf8.getAddress()),restored[layer][lane].getNumBytesAsUTF8(),error,sizeof(error))){
@@ -247,6 +257,17 @@ void RebitProcessor::setStateInformation(const void* data,int size) {
         if(p->paramID.startsWith("layer")){
             auto child=parameterTree.getChildWithProperty("id",p->paramID);
             if(version==1&&child.isValid()){parameterTree.removeChild(child,nullptr);child={};}
+            if(!child.isValid()){
+                juce::ValueTree defaults("PARAM");defaults.setProperty("id",p->paramID,nullptr);
+                defaults.setProperty("value",p->convertFrom0to1(p->getDefaultValue()),nullptr);parameterTree.addChild(defaults,-1,nullptr);
+            }
+        }
+    // Earlier formats have neither Clean mode nor effects. Do not inherit the
+    // currently active colour settings when recalling a legacy sound.
+    for(auto* parameter:getParameters())if(auto* p=dynamic_cast<juce::RangedAudioParameter*>(parameter))
+        if(p->paramID.startsWith("fx")||p->paramID.endsWith("SoundMode")){
+            auto child=parameterTree.getChildWithProperty("id",p->paramID);
+            if(version<3&&child.isValid()){parameterTree.removeChild(child,nullptr);child={};}
             if(!child.isValid()){
                 juce::ValueTree defaults("PARAM");defaults.setProperty("id",p->paramID,nullptr);
                 defaults.setProperty("value",p->convertFrom0to1(p->getDefaultValue()),nullptr);parameterTree.addChild(defaults,-1,nullptr);

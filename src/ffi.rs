@@ -2,9 +2,32 @@
 //! by the native processor. Its audio thread owns Engine; textMutex owns the
 //! canonical bank, and sequenceLock transfers ownership of pending banks.
 #![allow(clippy::missing_safety_doc)]
+use crate::effects::EffectsParameters;
 use crate::layers::{LayerMix, LayerMixer};
 use crate::{Engine, Parameters, Sequence, SequenceBank};
 use std::{ptr, slice};
+
+#[no_mangle]
+pub unsafe extern "C" fn rebit_engine_sound_mode(engine: *mut Engine, mode: i32) {
+    if let Some(e) = engine.as_mut() {
+        e.set_sound_mode(mode);
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_effects(
+    mixer: *mut LayerMixer,
+    parameters: *const EffectsParameters,
+) {
+    if let (Some(m), Some(p)) = (mixer.as_mut(), parameters.as_ref()) {
+        m.set_effects(*p);
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_clear_effects(mixer: *mut LayerMixer) {
+    if let Some(m) = mixer.as_mut() {
+        m.clear_effects_history();
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn rebit_engine_new_seeded(seed: u32) -> *mut Engine {
@@ -308,6 +331,21 @@ pub unsafe extern "C" fn rebit_engine_clock_status(engine: *const Engine) -> i32
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn colour_abi_and_null_handling() {
+        assert_eq!(std::mem::size_of::<EffectsParameters>(), 20);
+        assert_eq!(std::mem::align_of::<EffectsParameters>(), 4);
+        let mut e = Engine::default();
+        let mut mixer = LayerMixer::default();
+        unsafe {
+            rebit_engine_sound_mode(&mut e, 1);
+            assert_eq!(e.sound_mode(), 1);
+            rebit_engine_sound_mode(ptr::null_mut(), 1);
+            rebit_mixer_effects(ptr::null_mut(), &EffectsParameters::default());
+            rebit_mixer_effects(&mut mixer, ptr::null());
+            rebit_mixer_clear_effects(ptr::null_mut());
+        }
+    }
     #[test]
     fn layer_ffi_layout_stereo_mono_and_alias_guards() {
         assert_eq!(std::mem::size_of::<LayerMix>(), 12);

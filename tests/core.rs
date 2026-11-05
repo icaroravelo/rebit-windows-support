@@ -634,3 +634,75 @@ fn two_layer_automation_and_rendering_are_allocation_free_and_chunk_invariant() 
     assert_eq!(r, y);
     assert_eq!(m.playback(&a, &b), n.playback(&c, &d));
 }
+
+#[test]
+fn clean_and_effect_automation_are_chunk_invariant_and_allocation_free() {
+    use rebit_rust::{
+        effects::EffectsParameters,
+        layers::{LayerMix, LayerMixer},
+    };
+    let make = || {
+        let mut a = Box::new(Engine::new(48000., 123));
+        let mut b = Box::new(Engine::new(48000., 456));
+        for e in [&mut a, &mut b] {
+            e.set_parameters(Parameters {
+                gain: 0.2,
+                max_poly: 8,
+                release: 0.01,
+                ..Default::default()
+            });
+        }
+        let mut m = LayerMixer::default();
+        m.prepare(48000.);
+        m.set_mix(1, LayerMix::default());
+        (a, b, m)
+    };
+    let edit = |a: &mut Engine, b: &mut Engine, m: &mut LayerMixer, i: usize| {
+        a.set_sound_mode((i % 2) as i32);
+        b.set_sound_mode(((i / 3) % 2) as i32);
+        m.set_effects(EffectsParameters {
+            enabled: i32::from(!i.is_multiple_of(4)),
+            drive_db: (i % 25) as f32,
+            bits: 4. + (i % 21) as f32,
+            rate_divider: 1. + (i % 32) as f32,
+            mix: (i % 11) as f32 / 10.,
+        });
+        for e in [a, b] {
+            e.midi(0x90, (48 + i % 24) as u8, 100);
+            if i > 6 {
+                e.midi(0x80, (48 + (i - 6) % 24) as u8, 0);
+            }
+        }
+    };
+    let (mut a, mut b, mut m) = make();
+    let (mut c, mut d, mut n) = make();
+    let mut l = vec![0.; 96 * 137];
+    let mut r = vec![0.; l.len()];
+    let mut x = vec![0.; l.len()];
+    let mut y = vec![0.; l.len()];
+    for (i, (left, right)) in l.chunks_mut(137).zip(r.chunks_mut(137)).enumerate() {
+        edit(&mut a, &mut b, &mut m, i);
+        m.render(&mut a, &mut b, left, right);
+    }
+    ALLOCS.with(|c| c.set(0));
+    TRACK.with(|c| c.set(true));
+    for (i, (left, right)) in x.chunks_mut(137).zip(y.chunks_mut(137)).enumerate() {
+        edit(&mut c, &mut d, &mut n, i);
+        for (left, right) in left.chunks_mut(7).zip(right.chunks_mut(7)) {
+            n.render(&mut c, &mut d, left, right);
+        }
+    }
+    n.clear_effects_history();
+    c.midi(0xb0, 120, 0);
+    d.midi(0xb0, 120, 0);
+    let mut silence = [1.; 32];
+    let mut other = [1.; 32];
+    n.render(&mut c, &mut d, &mut silence, &mut other);
+    TRACK.with(|c| c.set(false));
+    assert_eq!(ALLOCS.with(Cell::get), 0);
+    assert_eq!(l, x);
+    assert_eq!(r, y);
+    assert!(l.iter().chain(&r).all(|x| x.is_finite()));
+    assert_eq!(silence, [0.; 32]);
+    assert_eq!(other, [0.; 32]);
+}

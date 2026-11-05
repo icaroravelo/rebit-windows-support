@@ -48,6 +48,9 @@ private:
     std::array<std::unique_ptr<Knob>,4> layerKnobs;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>,3> laneAttachments;
     void selectLayer(int);
+    std::unique_ptr<Choice> soundMode;
+    std::array<std::unique_ptr<Knob>,4> effectKnobs;
+    juce::ToggleButton effectsOn {"FX on"};
     juce::TextButton arpTab { "ARP" }, monoTab { "MONO" }, arpStop { "STOP" };
     juce::ToggleButton arpEnabled { "Arp on" }, arpLatch { "Latch" }, hostSync { "Host sync" };
     void updatePerformance();

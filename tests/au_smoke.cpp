@@ -107,6 +107,17 @@ int main(int argc,char** argv){
         if(std::abs(timingLeft[0]+.5f)>1e-7f)throw std::runtime_error("AU restart lost held chord");
         timing.beat=0.;timing.looping=true;renderTiming(2400);
         for(int i=0;i<400;++i)if(std::abs(timingLeft[i]-timingLeft[2000+i])>1e-7f)throw std::runtime_error("AU loop points did not reach engine");
+        check(AudioUnitUninitialize(unit),"Uninitialize before colour check");
+        setNamedNormalized(unit,"Arpeggiator",0);setNamedNormalized(unit,"Host sync",0);setNamedNormalized(unit,"Layer B enabled",0);
+        setNamedNormalized(unit,"Layer A sound mode",1);setNamedNormalized(unit,"Effects enabled",1);setNamedNormalized(unit,"Saturation drive",.5f);
+        setNamedNormalized(unit,"Bit depth",.2f);setNamedNormalized(unit,"Rate divider",7.f/31.f);setNamedNormalized(unit,"Effects mix",1);
+        check(AudioUnitInitialize(unit),"Initialize colour check");
+        check(MusicDeviceMIDIEvent(unit,0x90,0,127,0),"Colour note on");renderTiming(128);
+        for(int i=0;i<8;++i)if(std::abs(timingLeft[i])>1e-7f)throw std::runtime_error("AU Clean edge/sample hold differs");
+        if(std::abs(timingLeft[8])<.5f)throw std::runtime_error("AU saturation did not reach output");
+        for(int i=8;i<16;++i)if(std::abs(timingLeft[i]-timingLeft[8])>1e-7f||std::abs(timingRight[i]-timingLeft[i])>1e-7f)throw std::runtime_error("AU sample hold/stereo alignment differs");
+        check(MusicDeviceMIDIEvent(unit,0xb0,120,0,3),"Colour All Sound Off");renderTiming(128);
+        for(int i=3;i<128;++i)if(std::abs(timingLeft[i])>1e-7f)throw std::runtime_error("AU panic left effect history playing");
         check(AudioUnitUninitialize(unit),"Uninitialize");check(AudioComponentInstanceDispose(unit),"Dispose");
         // Keep the registered factory's library loaded for process lifetime.
         std::cout<<"AU: direct registration, instantiation, MIDI, stereo render, state recall, host PPQ/start-stop/loops passed\n";

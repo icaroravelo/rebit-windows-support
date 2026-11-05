@@ -298,7 +298,8 @@ struct RebitEditor::Knob final : public juce::Component
         if (parameter != nullptr) slider.setDoubleClickReturnValue (true, parameter->convertFrom0to1 (parameter->getDefaultValue()));
         addAndMakeVisible (title); addAndMakeVisible (slider);
         attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (state, id, slider);
-        slider.setNumDecimalPlacesToDisplay (id == "maxPoly" || id == "bendRange" || id == "sweepInitialPitch" || id == "arpGate" || id == "arpSwing" || id.endsWith("Transpose") || id.endsWith("Detune") ? 0 : id == "gain" || id == "suslevel" || id.endsWith("Gain") || id.endsWith("Pan") ? 2 : 3);
+        slider.setNumDecimalPlacesToDisplay (id == "maxPoly" || id == "bendRange" || id == "sweepInitialPitch" || id == "arpGate" || id == "arpSwing" || id.endsWith("Transpose") || id.endsWith("Detune") || id=="fxBits" || id=="fxRate" || id=="fxMix" ? 0 : id == "gain" || id == "suslevel" || id.endsWith("Gain") || id.endsWith("Pan") ? 2 : 3);
+        if(id=="fxDrive")slider.setNumDecimalPlacesToDisplay(1);
         slider.textFromValueFunction = nullptr;
         if(id.endsWith("Pan"))slider.textFromValueFunction=[](double value){return juce::String(std::abs(value)<1e-6?0.:value,2);};
         slider.updateText();
@@ -536,6 +537,19 @@ RebitEditor::RebitEditor (RebitProcessor& p)
         layerKnobs[i]->slider.setColour(juce::Slider::textBoxOutlineColourId,juce::Colours::transparentBlack);layerKnobs[i]->slider.lookAndFeelChanged();
     }
     layerKnobs[1]->slider.setTooltip("Stereo balance. Centre preserves unity in both channels; hard left/right silences the opposite channel. Mono outputs average left/right.");
+    soundMode=std::make_unique<Choice>(instrument.state,"layerASoundMode","SOUND MODE",juce::StringArray{"Raw","Clean"},mint);
+    soundMode->box.setName("Layer sound mode");soundMode->box.setTooltip("Raw preserves the original pulse and stepped triangle. Clean reduces oscillator aliasing with smoothed edges and a continuous triangle. Noise stays unchanged. Switching fades over 5 ms.");addAndMakeVisible(*soundMode);
+    effectsOn.setName("Effects enabled");effectsOn.setColour(accentColourId,amber);effectsOn.setTooltip("Enable shared output effects. Off bypasses all effects after a short fade. Neutral settings: Drive 0 dB, Bits 24, Rate 1x. Metering follows the processed output.");addAndMakeVisible(effectsOn);
+    toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"fxEnabled",effectsOn));
+    const char* fxIds[]={"fxDrive","fxBits","fxRate","fxMix"};const char* fxNames[]={"DRIVE","BITS","RATE DIV","MIX"};const char* fxSuffixes[]={" dB"," bit"," x"," %"};
+    for(size_t i=0;i<4;++i){
+        effectKnobs[i]=std::make_unique<Knob>(instrument.state,fxIds[i],fxNames[i],fxSuffixes[i],amber);addAndMakeVisible(*effectKnobs[i]);
+        effectKnobs[i]->slider.setColour(juce::Slider::textBoxOutlineColourId,juce::Colours::transparentBlack);effectKnobs[i]->slider.lookAndFeelChanged();
+    }
+    effectKnobs[0]->slider.setTooltip("Normalized soft saturation. 0 dB is neutral; higher drive adds harmonics. This stage can create aliasing even with Clean oscillators.");
+    effectKnobs[1]->slider.setTooltip("Output quantization, 4 to 24 bits. 24 bypasses quantization. Values above full scale are not clipped by this stage.");
+    effectKnobs[2]->slider.setTooltip("Stereo-linked sample-and-hold. 1x is neutral; 4x holds each captured sample for four host samples. Effective rate is host sample rate / divider.");
+    effectKnobs[3]->slider.setTooltip("Blend dry and processed output. FX off always returns the dry signal after its short transition.");
     setSize (1320, 930); updatePerformance();startTimerHz (15); timerCallback();
 }
 
@@ -566,6 +580,7 @@ void RebitEditor::selectLayer(int layer) {
     const char* aIds[]={"layerAGain","layerAPan","layerATranspose","layerADetune"};
     const char* bIds[]={"layerBGain","layerBPan","layerBTranspose","layerBDetune"};
     for(size_t i=0;i<4;++i){layerKnobs[i]->bind(instrument.state,layer==0?aIds[i]:bIds[i]);layerKnobs[i]->slider.setColour(accentColourId,layer==0?mint:violet);}
+    soundMode->bind(instrument.state,layer==0?"layerASoundMode":"layerBSoundMode");
     editA.setToggleState(layer==0,juce::dontSendNotification);editB.setToggleState(layer==1,juce::dontSendNotification);
     sequenceStatus.setText(layer==0?"Editing layer A. Performance and modulation are shared.":"Editing layer B. Performance and modulation are shared.",juce::dontSendNotification);
     switchingLayer=false;timerCallback();repaint();
@@ -631,6 +646,8 @@ void RebitEditor::timerCallback()
     knobs[portamento]->setEnabled (monoMode && choices[monoBehavior]->box.getSelectedItemIndex() == 0);
     knobs[arpSpeed]->setEnabled (monoMode && choices[arpInterval]->box.getSelectedItemIndex() == 8);
     knobs[arpSeconds]->setEnabled(choices[arpRate]->box.getSelectedItemIndex()==15);
+    for(auto& knob:effectKnobs)if(knob)knob->setEnabled(effectsOn.getToggleState());
+    repaint(1120,532,176,272);
     midiActive = false;
     for (int note = 0; note < 128; ++note)
         if (instrument.keyboard.isNoteOnForChannels (0xffff, note)) { midiActive = true; break; }
@@ -684,8 +701,10 @@ void RebitEditor::paint (juce::Graphics& g)
                 constexpr float widths[] = { 0.125f, 0.25f, 0.5f };
                 v = std::fmod (phase, 1.0f) < widths[juce::jlimit (0, 2, choices[pulseDuty]->box.getSelectedItemIndex())] ? 1.0f : -1.0f;
             }
-            else if (oscType == 1)
-                v = std::round ((1 - 4 * std::abs (std::fmod (phase, 1.0f) - 0.5f)) * 7.5f) / 7.5f;
+            else if (oscType == 1) {
+                v = 1 - 4 * std::abs (std::fmod (phase, 1.0f) - 0.5f);
+                if(soundMode->box.getSelectedItemIndex()==0)v=std::round(v*7.5f)/7.5f;
+            }
             else
             {
                 const int step = i / 4;
@@ -709,9 +728,9 @@ void RebitEditor::paint (juce::Graphics& g)
 
     panelShape(g,{1112,24,184,112});caption(g,"SOUND LAYERS",{1128,32,152,18},ink,10.f,true);
     section(g,{1112,160,184,648},"06",selectedLayer==0?"LAYER A":"LAYER B",selectedLayer==0?mint:violet);
-    caption(g,"INDEPENDENT SOUND",{1128,476,154,20},selectedLayer==0?mint:violet,9.f,true);
-    const char* help[]={"OSCILLATOR + ADSR","THREE SEQUENCE LANES","LEVEL + STEREO PAN","SEMITONES + CENTS","","SHARED PERFORMANCE","MASTER / MIDI / ARP","VOICES / MODULATION","","TRY A TRIANGLE SUB","TRANSPOSE B: -12 st"};
-    for(int i=0;i<11;++i)caption(g,help[i],{1128,505+i*21,154,18},muted,8.5f,true);
+    g.setColour(line);g.drawHorizontalLine(529,1128,1280);
+    caption(g,"MASTER FX",{1128,536,96,22},amber,9.f,true);
+    caption(g,effectsOn.getToggleState()?"SAT > HOLD > QUANT":"DRY / BYPASSED",{1128,781,156,18},effectsOn.getToggleState()?amber:muted,8.f,true);
     section (g, { 24, 160, 420, 170 }, "01", selectedLayer==0?"OSCILLATOR / A":"OSCILLATOR / B", selectedLayer==0?mint:violet);
     section (g, { 460, 160, 636, 170 }, "02", selectedLayer==0?"AMPLITUDE / A":"AMPLITUDE / B", amber);
     // A relative-time ADSR diagram follows the current amplitude parameters.
@@ -780,4 +799,7 @@ void RebitEditor::resized()
     editA.setBounds(1124,57,76,27);editB.setBounds(1210,57,76,27);
     layerAOn.setBounds(1124,98,76,22);layerBOn.setBounds(1210,98,76,22);
     for(size_t i=0;i<4;++i)if(layerKnobs[i])layerKnobs[i]->setBounds(1120+(int)(i%2)*88,208+(int)(i/2)*130,88,113);
+    if(soundMode)soundMode->setBounds(1128,470,152,46);
+    effectsOn.setBounds(1215,536,78,22);
+    for(size_t i=0;i<4;++i)if(effectKnobs[i])effectKnobs[i]->setBounds(1120+(int)(i%2)*88,568+(int)(i/2)*102,88,87);
 }

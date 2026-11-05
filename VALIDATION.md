@@ -379,3 +379,119 @@ and retained the previous Rust component. The installed signature verifies,
 its executable SHA-256 matches the built AU, and Apple `auval -v aumu RbR1 Rbit`
 reports **AU VALIDATION SUCCEEDED**. Restart Logic to load the replacement.
 Milestone 7, Raw/Clean modes and effects, is next.
+
+## Milestone 7: Raw/Clean and effects, 2026-11-05
+
+Raw keeps the prior pulse, stepped-triangle and noise calculation. Clean adds
+quadratic polynomial step residuals at pulse edges, and their cubic integrals
+at the two corners of an unquantized triangle. This is local edge/corner
+correction, with no tables, heap work, lookahead or block delay. Background on
+the ramp-correction approach is in [Esqueda, Välimäki and Bilbao, DAFx-16,
+Rounding Corners with BLAMP](https://research.spa.aalto.fi/publications/papers/dafx16-blamp/).
+The implementation here is a two-sided short polynomial, not a reproduction of
+that paper's reported experiments. No external implementation was vendored.
+
+Mode is independent per layer and crossfades over 5 ms without resetting voice
+phase, envelope or cursors. Retirement oscillators freeze the current mode blend
+and frequency. Noise stays unchanged. Clean does not bandlimit intentional note,
+pitch/duty/volume-sequence discontinuities, nor the subsequent colour effects.
+High-frequency fundamentals can be attenuated by the short correction; Clean
+is not level/spectrum identical to Raw and is not claimed to be alias-free.
+
+The shared post-mix chain is normalized tanh saturation, stereo-linked
+sample-and-hold, quantization, then dry/wet. It runs after any mono downmix and
+before metering. Controls and bypass ramp for 5 ms. Drive 0 dB, 24 bits and
+divider 1 are neutral; fully bypassed effects return dry samples directly and
+skip the colour calculation. Quantization does not clamp above-full-scale
+values; there is no new output limiter. A hold can extend ordinary zero-release
+note-offs by up to 31 host samples. STOP, channel All Sound Off, and host-synced
+arp stop clear shared hold history immediately. Other channels are recaptured
+from the surviving mix after channel All Sound Off.
+
+Existing parameter IDs and the 96-byte core ABI are retained; sound-mode calls
+and a separate 20-byte effects block are added. Version 3 saves the appended
+controls. Version-1/2 recall explicitly restores Raw/FX bypass, retaining their
+earlier one/two-layer migrations. Older binaries reject version 3. No DSP state
+is shared with the UI; parameter atomics and audio-thread ownership are retained.
+
+- **96 Rust tests pass.** Added oscillator bounds/DC and edge/corner checks,
+  direct non-harmonic-energy regressions for three pulse widths and triangle,
+  held-voice 5 ms mode transitions, return-to-Raw phase parity, unchanged noise,
+  exact bypass/neutral effects, quantization steps, linked stereo hold, odd/finite
+  saturation including its zero-drive limit, invalid settings, dry blend,
+  bypass ramp/history reset across 8–384 kHz, effect tails, post-FX metering,
+  effects ABI and null-boundary handling.
+- Tracked allocation tests cover rapid Clean/Raw and effect automation during
+  dual-layer playback. No Rust allocation/reallocation/freeing occurs; 7-sample
+  partitions produce identical stereo audio to continuous renders at matching
+  event positions. Clearing effects plus All Sound Off produces immediate zero.
+- Clippy passes with warnings denied. All four CTest groups pass. Native checks
+  cover real-editor mode attachment switching, FX enable, version-3 recall,
+  version-2 fallback preserving B, sample-offset panic with an active hold,
+  host stop with FX on, and post-effect output metering. Actual AU and VST3
+  hosts verify Clean's initial edge, saturation, and eight-sample hold groups;
+  AU additionally checks panic clearing the shared effect history at offset 3.
+- Before implementation, retained the milestone-6 renderer and rendered pulse,
+  noise and layered four-second demos. After implementation all three WAVs
+  compare byte-for-byte identical with Raw/FX bypass; this is a scoped
+  regression check rather than an all-patch sample-identity guarantee.
+- Rendered and inspected default, populated, B-selected, clipping, and Clean/FX
+  editor states. SOUND MODE and the four master FX controls fit the existing
+  1320x930 side panel. `preview-colour.png` shows actual processed Clean/FX
+  playback. No interactive Logic or audible listening test is claimed.
+- `dist/rebit-rust-colour-demo.wav` is 8 seconds at 48 kHz stereo PCM16. Sections
+  are Raw (0–2 s), Clean (2–4), Clean+saturation (4–6), and Clean+8-bit/8x hold
+  (6–8). Measured peak is 0.3932; no PCM samples clip. Reproduce with
+  `cargo run --release --offline --locked --example colour_demo`.
+
+### Actual-engine spectral comparison
+
+`quality_spectrum` exports actual Engine output at 48 kHz in coherent 32,768-frame
+records, with FX bypassed and steady envelopes. `scripts/analyze_quality.py`
+measures non-harmonic positive-frequency power divided by in-band harmonic
+power, excluding DC. Clean lowers that ratio by 15.82–39.53 dB across the tested
+12 shape/frequency pairs (about 625.5, 2998.5 and 7999.5 Hz). At 2998.5 Hz:
+
+| Shape | Raw alias/harmonic | Clean alias/harmonic | Improvement |
+| --- | ---: | ---: | ---: |
+| Pulse 12.5% | -9.03 dB | -27.80 dB | 18.77 dB |
+| Pulse 25% | -11.46 dB | -28.16 dB | 16.70 dB |
+| Pulse 50% | -12.75 dB | -28.96 dB | 16.21 dB |
+| Triangle | -23.65 dB | -47.86 dB | 24.21 dB |
+
+Data, full metrics and inspected plots are in `dist/quality-analysis/`:
+`metrics.json`, `spectra.svg`, `spectra.png` and the indexed `.f32` records.
+These results apply to the steady tested pitches, not arbitrary modulation,
+onsets, noise or nonlinear FX. They are not a subjective listening comparison.
+
+```
+cargo run --release --offline --locked --example quality_spectrum
+python3 scripts/analyze_quality.py
+```
+
+The analysis script needs NumPy/Matplotlib; those were installed only in a
+temporary analysis environment, not added as plugin or Rust dependencies.
+
+### Processing cost
+
+Same Apple M5 Pro / 48 kHz / 128-frame offline workload as milestone 6, median of
+three one-second renders using `--example layer_budget`:
+
+| Workload | Render wall time / 1 s audio |
+| --- | ---: |
+| A Raw, 8 static voices | 4.78 ms |
+| A Clean, 8 static voices | 4.76 ms |
+| A+B Raw, 8 each | 7.41 ms |
+| A+B Clean, 8 each | 7.71 ms |
+| A+B Raw, 64 each with vibrato | 74.39 ms |
+| A+B Clean, 64 each with vibrato | 88.66 ms |
+| A+B Clean, 8 each plus all FX | 7.76 ms |
+
+Small-case differences include measurement variability. These are offline
+throughput observations, not realtime scheduling, CPU-percentage or device
+latency guarantees, and exclude host/UI overhead. No speedup over C++ is claimed.
+
+Rebuilt and signed AU/VST3/standalone. The staged installer preserved the prior
+Rust AU; installed signature verification succeeds and its executable SHA-256
+matches the built AU. Apple `auval -v aumu RbR1 Rbit` reports **AU VALIDATION
+SUCCEEDED**. Restart Logic to load this build. Modulation/expression is next.
