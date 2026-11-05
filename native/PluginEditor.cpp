@@ -637,12 +637,60 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     effectKnobs[1]->slider.setTooltip("Output quantization, 4 to 24 bits. 24 bypasses quantization. Values above full scale are not clipped by this stage.");
     effectKnobs[2]->slider.setTooltip("Stereo-linked sample-and-hold. 1x is neutral; 4x holds each captured sample for four host samples. Effective rate is host sample rate / divider.");
     effectKnobs[3]->slider.setTooltip("Blend dry and processed output. FX off always returns the dry signal after its short transition.");
-    setSize (1320, 930); updatePerformance();updateModulationPanel();startTimerHz (15); timerCallback();
+    presetBox.setName("Preset browser");presetBox.setColour(accentColourId,mint);
+    presetBox.setTooltip("Factory patches. Selecting a preset resets the sound and sequences, then loads the patch. Use UNDO to return to the previous patch.");
+    presetPrev.setName("Previous preset");presetNext.setName("Next preset");
+    presetPrev.getProperties().set("sequenceSmall",true);presetNext.getProperties().set("sequenceSmall",true);
+    presetPrev.setColour(accentColourId,mint);presetNext.setColour(accentColourId,mint);
+    presetStatus.setFont(type(10,true));presetStatus.setColour(juce::Label::textColourId,muted);
+    presetStatus.setText("Factory presets. Select a patch to load; UNDO restores the previous patch.",juce::dontSendNotification);
+    refreshPresets();
+    presetBox.onChange=[this]{if(loadingPreset)return;const auto index=presetBox.getSelectedItemIndex();if(index>=0){instrument.loadPreset(index);presetStatus.setText("Loaded "+presetBox.getText(),juce::dontSendNotification);undoButton.setEnabled(true);}};
+    presetPrev.onClick=[this]{if(presetBox.getNumItems()==0)return;presetBox.setSelectedItemIndex(juce::jmax(0,presetBox.getSelectedItemIndex()-1),juce::sendNotificationSync);};
+    presetNext.onClick=[this]{if(presetBox.getNumItems()==0)return;presetBox.setSelectedItemIndex(juce::jmin(presetBox.getNumItems()-1,presetBox.getSelectedItemIndex()+1),juce::sendNotificationSync);};
+    addAndMakeVisible(presetBox);addAndMakeVisible(presetPrev);addAndMakeVisible(presetNext);addAndMakeVisible(presetStatus);
+    seedEditor.setName("Random seed");seedEditor.setText("1",false);seedEditor.setInputRestrictions(9,"0123456789");
+    seedEditor.setFont(type(12,true));seedEditor.setIndents(8,5);
+    seedEditor.setTooltip("Deterministic random seed. The same starting patch, seed and locks produce the same randomization.");
+    newSeed.setName("New seed");newSeed.getProperties().set("sequenceSmall",true);newSeed.setColour(accentColourId,violet);
+    newSeed.setTooltip("Choose a new deterministic seed without randomizing yet.");
+    newSeed.onClick=[this]{seedEditor.setText(juce::String(juce::Random::getSystemRandom().nextInt(999999999)+1),false);};
+    const char* lockNames[]={"OSC","ENV","SEQ","MOD","FX","MIX"};
+    const char* lockTips[]={"Lock oscillator and sound mode settings.","Lock both layers' ADSR envelopes.","Lock sequence text, lane enables and frame clock.","Lock matrix routes, LFOs and macros.","Lock the shared effects chain.","Lock layers, voices, levels, pans, tuning and master gain."};
+    for(int i=0;i<6;++i){randomLocks[(size_t)i].setButtonText(lockNames[i]);randomLocks[(size_t)i].setName(juce::String("Lock ")+lockNames[i]);randomLocks[(size_t)i].setColour(accentColourId,violet);randomLocks[(size_t)i].setTooltip(lockTips[i]);addAndMakeVisible(randomLocks[(size_t)i]);}
+    randomStatus.setFont(type(10,true));randomStatus.setColour(juce::Label::textColourId,muted);
+    randomStatus.setText("Seed 1 - all sections unlocked.",juce::dontSendNotification);
+    randomizeButton.setName("Randomize");randomizeButton.setTooltip("Randomize every unlocked section using the seed. Undo restores the previous patch.");
+    undoButton.setName("Undo");undoButton.setTooltip("Restore the patch from before the last preset load or randomization.");
+    undoButton.setEnabled(false);
+    randomizeButton.onClick=[this]{
+        auto digits=seedEditor.getText().retainCharacters("0123456789");
+        const auto seed=digits.isEmpty()?1u:(uint32_t)juce::jlimit(1,999999999,digits.getIntValue());
+        seedEditor.setText(juce::String(seed),false);
+        int locked=0;for(int i=0;i<6;++i)if(randomLocks[(size_t)i].getToggleState())locked|=1<<i;
+        instrument.randomize(seed,locked);
+        randomStatus.setText("Seed "+juce::String(seed)+(locked!=0?" - locked sections kept.":" - all sections randomized."),juce::dontSendNotification);
+        presetStatus.setText("Patch randomized. UNDO restores the previous state.",juce::dontSendNotification);
+        undoButton.setEnabled(instrument.canUndo());
+    };
+    undoButton.onClick=[this]{instrument.undo();randomStatus.setText("Last preset or randomization undone.",juce::dontSendNotification);presetStatus.setText("Previous patch restored.",juce::dontSendNotification);undoButton.setEnabled(instrument.canUndo());};
+    addAndMakeVisible(seedEditor);addAndMakeVisible(newSeed);addAndMakeVisible(randomizeButton);addAndMakeVisible(undoButton);addAndMakeVisible(randomStatus);
+    setSize (1320, 1080); updatePerformance();updateModulationPanel();startTimerHz (15); timerCallback();
 }
 
 RebitEditor::~RebitEditor()
 {
     stopTimer(); setLookAndFeel (nullptr);
+}
+
+void RebitEditor::refreshPresets() {
+    loadingPreset=true;
+    const auto selected=presetBox.getSelectedItemIndex();
+    presetBox.clear(juce::dontSendNotification);
+    for(int i=0;i<instrument.presetCount();++i)presetBox.addItem(instrument.presetLabel(i),i+1);
+    if(selected>=0&&selected<presetBox.getNumItems())presetBox.setSelectedItemIndex(selected,juce::dontSendNotification);
+    else if(presetBox.getNumItems()>0)presetBox.setSelectedItemIndex(0,juce::dontSendNotification);
+    loadingPreset=false;
 }
 
 void RebitEditor::selectLayer(int layer) {
@@ -755,6 +803,7 @@ void RebitEditor::timerCallback()
     knobs[arpSeconds]->setEnabled(choices[arpRate]->box.getSelectedItemIndex()==15);
     knobs[bend]->setEnabled(!mpeOn.getToggleState());
     for(auto& knob:effectKnobs)if(knob)knob->setEnabled(effectsOn.getToggleState());
+    undoButton.setEnabled(instrument.canUndo());
     repaint(1120,532,176,272);
     midiActive = false;
     for (int note = 0; note < 128; ++note)
@@ -864,13 +913,16 @@ void RebitEditor::paint (juce::Graphics& g)
     section (g, { 24, 546, 1072, 262 }, "05", selectedLayer==0?"SEQUENCES / A":"SEQUENCES / B", cyan);
     caption (g, choices[sequenceClock]->box.getSelectedItemIndex()==0?"60 Hz":"MUSICAL", { 1015, 555, 62, 20 }, cyan, 10, true);
     caption (g, "TEXT", { 40, 743, 56, 31 }, muted, 10, true);
-    caption (g, "PLAY", { 25, 818, 60, 18 }, mint, 10, true);
-    caption (g, "MIDI input or click the keys", { 81, 818, 280, 18 }, muted, 10);
-    caption (g, "SCROLL TO CHANGE OCTAVE", { 882, 818, 214, 18 }, muted, 9, true);
-    g.setColour (line); g.drawHorizontalLine (907, 24, (float)getWidth()-24.f);
-    caption (g, "REBIT RUST", { 24, 911, 140, 15 }, muted, 8.5f, true);
-    caption (g, "PULSE / TRIANGLE / NOISE", { 426, 911, 300, 15 }, muted, 8.5f, true);
-    caption (g, juce::String ("v") + JucePlugin_VersionString, { getWidth()-72, 911, 48, 15 }, muted, 8.5f, true);
+    section (g, { 24, 818, 1272, 150 }, "07", "PRESETS / RANDOM", violet);
+    caption (g, "SEED", { 520, 838, 60, 14 }, violet, 8.5f, true);
+    caption (g, "LOCK SECTIONS", { 720, 838, 160, 14 }, violet, 8.5f, true);
+    caption (g, "PLAY", { 25, 968, 60, 18 }, mint, 10, true);
+    caption (g, "MIDI input or click the keys", { 81, 968, 280, 18 }, muted, 10);
+    caption (g, "SCROLL TO CHANGE OCTAVE", { 882, 968, 214, 18 }, muted, 9, true);
+    g.setColour (line); g.drawHorizontalLine (1057, 24, (float)getWidth()-24.f);
+    caption (g, "REBIT RUST", { 24, 1061, 140, 15 }, muted, 8.5f, true);
+    caption (g, "PULSE / TRIANGLE / NOISE", { 426, 1061, 300, 15 }, muted, 8.5f, true);
+    caption (g, juce::String ("v") + JucePlugin_VersionString, { getWidth()-72, 1061, 48, 15 }, muted, 8.5f, true);
 }
 
 void RebitEditor::resized()
@@ -913,11 +965,18 @@ void RebitEditor::resized()
     applySequences.setBounds (868, 744, 208, 30);
     sequenceStatus.setBounds (96, 781, 980, 20);
     sequenceCanvas->setBounds(40,584,1032,148);
-    keyboard->setBounds (24, 843, getWidth()-48, 54);
+    keyboard->setBounds (24, 993, getWidth()-48, 54);
     editA.setBounds(1124,57,76,27);editB.setBounds(1210,57,76,27);
     layerAOn.setBounds(1124,98,76,22);layerBOn.setBounds(1210,98,76,22);
     for(size_t i=0;i<4;++i)if(layerKnobs[i])layerKnobs[i]->setBounds(1120+(int)(i%2)*88,208+(int)(i/2)*130,88,113);
     if(soundMode)soundMode->setBounds(1128,470,152,46);
     effectsOn.setBounds(1215,536,78,22);
     for(size_t i=0;i<4;++i)if(effectKnobs[i])effectKnobs[i]->setBounds(1120+(int)(i%2)*88,568+(int)(i/2)*102,88,87);
+    presetBox.setBounds(40,855,360,32);
+    presetPrev.setBounds(408,855,42,32);presetNext.setBounds(456,855,42,32);
+    presetStatus.setBounds(40,893,450,20);
+    seedEditor.setBounds(520,855,110,30);newSeed.setBounds(638,855,64,30);
+    for(int i=0;i<6;++i)randomLocks[(size_t)i].setBounds(720+i*62,855,58,22);
+    randomizeButton.setBounds(1110,849,130,34);undoButton.setBounds(1110,889,130,30);
+    randomStatus.setBounds(520,893,570,20);
 }

@@ -30,9 +30,11 @@ sequence controls.
 See `preview.png` for the default patch, `preview-showcase.png` for a populated
 patch, `preview-layer-b.png` for B's controls, `preview-colour.png` for Clean/FX,
 `preview-mod.png` for the route matrix, `preview-lfo.png` for LFO sources,
-`preview-macros.png` for macros and MPE, and `preview-clipping.png` for output
-above full scale with a releasing voice. All are rendered from the actual
-editor and audio processor; preview patches do not change defaults.
+`preview-macros.png` for macros and MPE, `preview-presets.png` for the preset
+browser, `preview-random.png` for seeded randomization with a locked envelope,
+and `preview-clipping.png` for output above full scale with a releasing voice.
+All are rendered from the actual editor and audio processor; preview patches do
+not change defaults.
 
 ### Two sound layers
 
@@ -61,7 +63,8 @@ stops its synthesis after the fade; enabling it restarts its own envelopes and
 sequences from currently held/pedal-retained notes or the current arp step.
 Expired release tails and discarded pedal-only voices are not recreated.
 
-The editor is now 1320x930, with the layer controls in a side panel. Invalid
+The editor is now 1320x1080, with the layer controls in a side panel and a
+preset/random panel below the sequencer. Invalid
 sequence drafts must be corrected before switching layers. Each layer's bank
 and playhead stay separate; editing B does not change A's sequence text.
 
@@ -208,6 +211,44 @@ Modulation LFOs are free-running, not host-tempo-synced. Shared balance/effect
 routes use layer A's clock; if you only need per-note movement, either layer can
 carry the route. The editor previews are `preview-mod.png`, `preview-lfo.png`
 and `preview-macros.png`.
+
+### Presets and musical randomization
+
+Section **07 PRESETS / RANDOM** holds the factory browser and randomization
+controls. The browser starts with **Init** and includes bass, lead, percussion,
+game-effect and pad patches, for example **Sub Pulse**, **Rubber Bass**,
+**Wobble**, **Arcade Lead**, **Glide Lead**, **Noise Hat**, **Chip Kick**,
+**Coin**, **Laser**, **Power Up** and **Wide Layers**. Select a patch with the
+list or the previous/next buttons.
+
+Loading a preset first returns every parameter and both sequence banks to their
+defaults, then applies the patch. This makes recall complete and repeatable;
+the previous patch is saved so **UNDO** restores it. Preset loads stop sounding
+voices rather than carrying the old performance into the new sound.
+
+Randomization is deterministic. Type a **SEED** or press **NEW**, leave the
+sections you want to keep unchanged locked with **OSC / ENV / SEQ / MOD / FX /
+MIX**, then press **RANDOMIZE**. The same starting patch, seed and locks produce
+the same result. Each randomization and preset load is undoable; the last eight
+states are retained.
+
+- **OSC** picks both layers' waveform, pulse width, noise type and Raw/Clean mode.
+- **ENV** picks both layers' attack, decay, sustain and release within musical
+  ranges.
+- **SEQ** generates valid volume, pitch and duty patterns for both layers,
+  chooses lane enables and sets the frame clock. Pitch patterns use a diatonic
+  set and stay inside the accepted range.
+- **MOD** picks one to three routes, LFO shapes/rates/retrigger and macro values.
+  MPE settings stay unchanged.
+- **FX** chooses bypass or an effects setting with drive, bit depth, sample rate
+  and mix.
+- **MIX** picks voices, master gain, layer enables, levels, pans, transpose and
+  detune. Layer A stays enabled.
+
+The arpeggiator and MPE mode are performance settings, not randomization
+targets, so a randomized patch does not surprise you by enabling them. The
+seed field is not part of the saved patch or presets; it is an editing aid, while
+the resulting patch is saved normally in version-4 state.
 
 ## Run it
 

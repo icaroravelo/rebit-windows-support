@@ -1,5 +1,33 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Presets.h"
+#include <array>
+
+namespace {
+struct DeterministicRandom {
+    uint32_t state;
+    explicit DeterministicRandom (uint32_t seed) : state (seed ? seed : 0x9e3779b9u) {}
+    uint32_t next() {
+        uint32_t x = state;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        state = x;
+        return x;
+    }
+    float unit() { return (float) (next() >> 8) * (1.f / 16777216.f); }
+    int range (int lo, int hi) { return lo + (int) (next() % (uint32_t) (hi - lo + 1)); }
+    float range (float lo, float hi) { return lo + (hi - lo) * unit(); }
+    bool chance (float probability) { return unit() < probability; }
+};
+enum RandomSection : int {
+    RandomOsc = 1, RandomEnv = 2, RandomSeq = 4,
+    RandomMod = 8, RandomFx = 16, RandomMix = 32, RandomAll = 63
+};
+juce::String join (const juce::Array<int>& values) {
+    juce::StringArray parts;
+    for (auto value : values) parts.add (juce::String (value));
+    return parts.joinIntoString (",");
+}
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout RebitProcessor::layout() {
     juce::AudioProcessorValueTreeState::ParameterLayout l;
@@ -241,6 +269,162 @@ juce::String RebitProcessor::setSequenceText(int lane,const juce::String& text,i
     {const juce::SpinLock::ScopedLockType lock(sequenceLock);std::swap(pending[index],publication);sequenceDirty[index]=true;}
     rebit_bank_free(publication);texts[index][(size_t)lane]=text;++sequenceVersion[index];return {};
 }
+void RebitProcessor::setParameterValue (const char* id, float value) {
+    if (auto* parameter = state.getParameter (id))
+        parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+}
+void RebitProcessor::resetToDefaults() {
+    for (auto* parameter : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter))
+            ranged->setValueNotifyingHost (ranged->getDefaultValue());
+    for (int layer = 0; layer < 2; ++layer)
+        for (int lane = 0; lane < 3; ++lane)
+            setSequenceText (lane, juce::String(), layer);
+}
+void RebitProcessor::pushUndo() {
+    juce::MemoryBlock snapshot;
+    getStateInformation (snapshot);
+    if (undoStack.size() >= 8) undoStack.erase (undoStack.begin());
+    undoStack.push_back (std::move (snapshot));
+}
+int RebitProcessor::presetCount() const { return (int) factoryPresets().size(); }
+juce::String RebitProcessor::presetLabel (int index) const {
+    const auto& presets = factoryPresets();
+    if (index < 0 || index >= (int) presets.size()) return {};
+    const auto& preset = presets[(size_t) index];
+    if (preset.category == preset.name) return juce::String (preset.name);
+    return juce::String (preset.category) + " \xe2\x80\x94 " + juce::String (preset.name);
+}
+void RebitProcessor::loadPreset (int index) {
+    const auto& presets = factoryPresets();
+    if (index < 0 || index >= (int) presets.size()) return;
+    const auto& preset = presets[(size_t) index];
+    pushUndo();
+    resetToDefaults();
+    for (const auto& parameter : preset.parameters) setParameterValue (parameter.id, parameter.value);
+    const char* laneIds[] = { "isVolumeSequenceEnabled_raw", "isPitchSequenceEnabled_raw", "isDutySequenceEnabled_raw" };
+    for (int layer = 0; layer < 2; ++layer) {
+        const auto& sequences = layer == 0 ? preset.sequenceA : preset.sequenceB;
+        const auto& lanes = layer == 0 ? preset.lanesA : preset.lanesB;
+        for (int lane = 0; lane < 3; ++lane) {
+            setSequenceText (lane, juce::String (sequences[(size_t) lane]), layer);
+            setParameterValue (layerParameter (laneIds[lane], layer), lanes[(size_t) lane] ? 1.f : 0.f);
+        }
+    }
+    resetRequested.store (true);
+}
+void RebitProcessor::undo() {
+    if (undoStack.empty()) return;
+    auto snapshot = std::move (undoStack.back());
+    undoStack.pop_back();
+    setStateInformation (snapshot.getData(), (int) snapshot.getSize());
+}
+void RebitProcessor::randomize (uint32_t seed, int lockedSections) {
+    lockedSections &= RandomAll;
+    if (lockedSections == RandomAll) return;
+    pushUndo();
+    DeterministicRandom random (seed);
+    auto set = [this] (const char* id, float value) { setParameterValue (id, value); };
+    auto chance = [&random] (float probability) { return random.chance (probability); };
+    auto range = [&random] (int lo, int hi) { return random.range (lo, hi); };
+    auto value = [&random] (float lo, float hi) { return random.range (lo, hi); };
+    const char* laneIds[] = { "isVolumeSequenceEnabled_raw", "isPitchSequenceEnabled_raw", "isDutySequenceEnabled_raw" };
+    if ((lockedSections & RandomOsc) == 0) {
+        set ("osc", (float) range (0, 2));
+        set ("duty", (float) range (0, 2));
+        set ("noiseAlgorithm_raw", (float) range (0, 2));
+        set ("layerBOsc", (float) range (0, 2));
+        set ("layerBDuty", (float) range (0, 2));
+        set ("layerBNoise", (float) range (0, 2));
+        set ("layerASoundMode", chance (0.35f) ? 1.f : 0.f);
+        set ("layerBSoundMode", chance (0.35f) ? 1.f : 0.f);
+    }
+    if ((lockedSections & RandomEnv) == 0) {
+        auto envelope = [&] (const char* attack, const char* decay, const char* sustain, const char* release) {
+            set (attack, chance (0.72f) ? value (0.f, 0.08f) : value (0.1f, 1.2f));
+            set (decay, value (0.02f, 1.2f));
+            set (sustain, value (0.15f, 1.f));
+            set (release, value (0.02f, 1.4f));
+        };
+        envelope ("attack", "decay", "suslevel", "release");
+        envelope ("layerBAttack", "layerBDecay", "layerBSustain", "layerBRelease");
+    }
+    if ((lockedSections & RandomSeq) == 0) {
+        set ("sequenceClock", (float) range (0, 7));
+        set ("pitchSequenceMode_raw", chance (0.25f) ? 1.f : 0.f);
+        const int scale[] = { 0, 2, 3, 5, 7, 10, 12 };
+        for (int layer = 0; layer < 2; ++layer) {
+            for (int lane = 0; lane < 3; ++lane) {
+                juce::Array<int> main, release;
+                if (lane == 0) {
+                    for (int i = 0; i < 8; ++i) main.add (chance (0.18f) ? range (0, 12) : 15);
+                    release.add (0); release.add (0);
+                } else if (lane == 1) {
+                    const int root = range (-12, 12);
+                    for (int i = 0; i < 8; ++i) {
+                        const int note = root + scale[range (0, 6)] + (chance (0.25f) ? 12 : 0);
+                        main.add (juce::jlimit (-64, 63, note));
+                    }
+                    release.add (0);
+                } else {
+                    for (int i = 0; i < 8; ++i) main.add (range (0, 2));
+                    release.add (0);
+                }
+                const auto text = "[" + join (main) + "]|" + join (release);
+                setSequenceText (lane, text, layer);
+                const float laneChance = lane == 0 ? 0.65f : lane == 1 ? 0.55f : 0.35f;
+                setParameterValue (layerParameter (laneIds[lane], layer), chance (laneChance) ? 1.f : 0.f);
+            }
+        }
+    }
+    if ((lockedSections & RandomMod) == 0) {
+        const int activeRoutes = range (1, 3);
+        for (int i = 0; i < 4; ++i) {
+            const auto n = juce::String (i + 1);
+            if (i < activeRoutes) {
+                set (("mod" + n + "Source").toRawUTF8(), (float) range (1, 12));
+                set (("mod" + n + "Dest").toRawUTF8(), (float) range (1, 6));
+                set (("mod" + n + "Amount").toRawUTF8(), value (-75.f, 75.f));
+            } else {
+                set (("mod" + n + "Source").toRawUTF8(), 0.f);
+                set (("mod" + n + "Dest").toRawUTF8(), 0.f);
+                set (("mod" + n + "Amount").toRawUTF8(), 0.f);
+            }
+        }
+        for (int i = 0; i < 2; ++i) {
+            const auto n = juce::String (i + 1);
+            set (("lfo" + n + "Shape").toRawUTF8(), (float) range (0, 5));
+            set (("lfo" + n + "Rate").toRawUTF8(), chance (0.6f) ? value (0.1f, 2.f) : value (1.f, 8.f));
+            set (("lfo" + n + "Retrigger").toRawUTF8(), chance (0.4f) ? 1.f : 0.f);
+        }
+        for (int i = 0; i < 4; ++i)
+            set (("macro" + juce::String (i + 1)).toRawUTF8(), chance (0.25f) ? 0.f : value (0.2f, 1.f));
+    }
+    if ((lockedSections & RandomFx) == 0) {
+        const bool enabled = chance (0.55f);
+        set ("fxEnabled", enabled ? 1.f : 0.f);
+        set ("fxDrive", value (0.f, 18.f));
+        set ("fxBits", (float) range (6, 24));
+        set ("fxRate", (float) range (1, 12));
+        set ("fxMix", value (25.f, 100.f));
+    }
+    if ((lockedSections & RandomMix) == 0) {
+        const int polys[] = { 1, 1, 4, 8, 16 };
+        set ("maxPoly", (float) polys[range (0, 4)]);
+        set ("gain", value (0.25f, 0.6f));
+        set ("layerAEnabled", 1.f);
+        set ("layerBEnabled", chance (0.55f) ? 1.f : 0.f);
+        set ("layerAGain", value (0.4f, 1.f));
+        set ("layerBGain", value (0.3f, 0.9f));
+        set ("layerAPan", value (-0.5f, 0.5f));
+        set ("layerBPan", value (-0.5f, 0.5f));
+        set ("layerATranspose", (float) range (-12, 12));
+        set ("layerBTranspose", (float) range (-24, 24));
+        set ("layerADetune", value (-12.f, 12.f));
+        set ("layerBDetune", value (-15.f, 15.f));
+    }
+}
+
 void RebitProcessor::getStateInformation(juce::MemoryBlock& out) {
     const juce::ScopedLock lock(textMutex);auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",4);
     xml->addChildElement(state.copyState().createXml().release());const char* names[]={"volume","pitch","duty"};

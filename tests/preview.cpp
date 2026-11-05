@@ -12,6 +12,7 @@ int main(int argc,char** argv) {
     const bool modPage=mode=="--mod";
     const bool lfoPage=mode=="--lfo";
     const bool macroPage=mode=="--macros";
+    const bool randomPage=mode=="--random";
     const bool dual=colour||modPage||lfoPage||macroPage||mode=="--showcase"||mode=="--layer-b";
     if(dual) {
         auto set=[&](const char* id,float value){if(auto* p=processor->state.getParameter(id))p->setValueNotifyingHost(p->convertTo0to1(value));};
@@ -53,6 +54,13 @@ int main(int argc,char** argv) {
     if(modPage||lfoPage||macroPage)clickPage("Modulation page");
     if(lfoPage)clickPage("LFO page");
     if(macroPage)clickPage("Macros page");
+    if(randomPage){
+        for(auto* child:editor->getChildren()){
+            if(child->getName()=="Random seed")if(auto* field=dynamic_cast<juce::TextEditor*>(child))field->setText("20261105",false);
+            if(child->getName()=="Lock ENV")if(auto* lock=dynamic_cast<juce::ToggleButton*>(child))lock->setToggleState(true,juce::dontSendNotification);
+            if(child->getName()=="Randomize")if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();
+        }
+    }
     editor->setVisible(true);
     auto image=editor->createComponentSnapshot(editor->getLocalBounds(),true,1.5f);
     juce::File output(argc>1?argv[1]:"/tmp/rebit-preview.png");

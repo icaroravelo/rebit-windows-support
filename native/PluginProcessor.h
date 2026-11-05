@@ -49,12 +49,21 @@ public:
     PlaybackSnapshot playbackInfo() const;
     void clearClip() { clipAcknowledged.store(clipRevision.load(std::memory_order_relaxed),std::memory_order_relaxed); }
     juce::String setSequenceText(int,const juce::String&,int layer=0);
+    int presetCount() const;
+    juce::String presetLabel(int) const;
+    void loadPreset(int);
+    void randomize(uint32_t seed,int lockedSections);
+    void undo();
+    bool canUndo() const { return !undoStack.empty(); }
     void stopArpeggiator() { keyboard.reset();resetRequested.store(true); } // Message thread.
     juce::AudioProcessorValueTreeState state;
     juce::MidiKeyboardState keyboard;
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout layout();
     float value(const char*) const;
+    void setParameterValue(const char*,float);
+    void resetToDefaults();
+    void pushUndo();
     void readParameters(bool readTransport=true);
     void midi(const juce::MidiMessage&);
     void publishPlayback(); // Audio thread, or prepare before processing starts.
@@ -79,5 +88,6 @@ private:
     std::atomic<uint32_t> clipRevision {0}, clipAcknowledged {0}, playbackRevision {0};
     std::atomic<uint32_t> playbackIdleAfterMs {250};
     std::atomic<bool> resetRequested{false};
+    std::vector<juce::MemoryBlock> undoStack; // Message thread only, bounded below.
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RebitProcessor)
 };

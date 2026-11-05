@@ -36,7 +36,7 @@ parameter IDs, and version-1 patches; migrate state explicitly when needed.
    - Velocity, wheel, aftertouch, and LFO routing; performance macros.
    - Pulse width, pitch, layer balance, and effects destinations.
    - Add MPE as a later part of this milestone, including the JUCE MIDI bridge.
-9. **Presets and musical randomization — next**
+9. **Presets and musical randomization — completed and installed**
    - Preset browser and useful bass, lead, percussion, and game-effect patches.
    - Section-selective randomization, locks, deterministic seeds, and undo.
 
@@ -167,5 +167,31 @@ checks, chunk invariance, allocation checks, editor routing, state recall and
 legacy migration. The AU, VST3 and standalone builds pass; Apple AU validation
 succeeds after installation. Previews are `preview-mod.png`, `preview-lfo.png`
 and `preview-macros.png`; the eight-second demo is
-`dist/rebit-rust-mod-demo.wav`. Milestone 9, presets and musical randomization,
-is next.
+`dist/rebit-rust-mod-demo.wav`.
+
+## Milestone 9 delivery
+
+Completed 2026-11-05. Added a factory preset browser with 12 patches across
+Init, Bass, Lead, Percussion, Game and Pad categories, previous/next selection,
+and undoable loads. Preset loads return all parameters and both sequence banks
+to defaults before applying the patch, so recall is complete and repeatable.
+
+Added seeded randomization with six independent locks: oscillator, envelope,
+sequences, modulation, effects and mix. The same starting patch, seed and locks
+produce the same result. Unlocked sections produce musical bounds: both layers'
+oscillator/envelope settings, valid volume/pitch/duty patterns and lane enables,
+one to three matrix routes with LFO and macro settings, an optional effects
+configuration, and layer/voice/level/tuning choices. Arpeggiator and MPE mode
+stay under performance control.
+
+Both preset loads and randomizations push a bounded eight-entry undo stack. The
+editor gains a 150-pixel PRESETS / RANDOM panel and now opens at 1320x1080; the
+keyboard and footer moved down to match. Previews are `preview-presets.png` and
+`preview-random.png`.
+
+105 Rust tests, Clippy with warnings denied, and all four CTest groups pass.
+Native checks cover preset categories and recall, sequence-bearing presets,
+deterministic same-seed output, different-seed output, locked sections, undo,
+valid randomized sequence text, editor controls and undo restoration. The AU,
+VST3 and standalone builds pass; the installed AU signature verifies and Apple
+AU validation succeeds. The original C++ Rebit remains unchanged.

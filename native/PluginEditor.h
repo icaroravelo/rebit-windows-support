@@ -62,6 +62,15 @@ private:
     std::array<std::unique_ptr<Knob>,4> macroKnobs;
     juce::ToggleButton mpeOn { "MPE" };
     std::unique_ptr<Knob> mpeBend;
+    juce::ComboBox presetBox;
+    juce::TextButton presetPrev { "<" }, presetNext { ">" };
+    juce::Label presetStatus;
+    juce::TextEditor seedEditor;
+    juce::TextButton newSeed { "NEW" }, randomizeButton { "RANDOMIZE" }, undoButton { "UNDO" };
+    std::array<juce::ToggleButton,6> randomLocks;
+    juce::Label randomStatus;
+    bool loadingPreset = false;
+    void refreshPresets();
     juce::ToggleButton arpEnabled { "Arp on" }, arpLatch { "Latch" }, hostSync { "Host sync" };
     void updatePerformance();
     void updateModulationPanel();

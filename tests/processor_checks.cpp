@@ -258,6 +258,92 @@ int main() {
             mpe->setToggleState(true,juce::sendNotificationSync);
             require(mod.state.getRawParameterValue("mpeEnabled")->load()>.5f,"MPE switch did not reach the processor");
         }
+        {
+            RebitProcessor presets;
+            require(presets.presetCount()>=10,"Factory preset list is too small");
+            bool bass=false,lead=false,percussion=false,game=false,pad=false;
+            int sub=-1;
+            for(int i=0;i<presets.presetCount();++i){
+                const auto label=presets.presetLabel(i);
+                bass|=label.contains("Bass");lead|=label.contains("Lead");percussion|=label.contains("Percussion");
+                game|=label.contains("Game");pad|=label.contains("Pad");
+                if(label.contains("Sub Pulse"))sub=i;
+            }
+            require(bass&&lead&&percussion&&game&&pad,"Factory presets do not cover the requested categories");
+            require(sub>=0,"Sub Pulse preset missing");
+            auto set=[&](const char* id,float value){auto* p=presets.state.getParameter(id);require(p!=nullptr,"Missing preset test parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};
+            set("gain",.12f);
+            presets.loadPreset(sub);
+            require(presets.state.getRawParameterValue("layerBEnabled")->load()>.5f,"Preset did not enable layer B");
+            require(std::abs(presets.state.getRawParameterValue("gain")->load()-.55f)<.001f,"Preset did not load master gain");
+            require(std::abs(presets.state.getRawParameterValue("layerBTranspose")->load()+12.f)<.001f,"Preset did not load layer tuning");
+            require(presets.canUndo(),"Preset load did not create an undo snapshot");
+            presets.undo();
+            require(std::abs(presets.state.getRawParameterValue("gain")->load()-.12f)<.001f,"Undo did not restore the previous patch");
+
+            int hat=-1;
+            for(int i=0;i<presets.presetCount();++i)if(presets.presetLabel(i).contains("Noise Hat"))hat=i;
+            require(hat>=0,"Noise Hat preset missing");
+            presets.loadPreset(hat);
+            require(presets.sequenceText(0)=="15,8,15,4[15,8]|0"&&presets.state.getRawParameterValue("isVolumeSequenceEnabled_raw")->load()>.5f,"Preset did not load its sequence and lane enable");
+
+            int coin=-1;
+            for(int i=0;i<presets.presetCount();++i)if(presets.presetLabel(i).contains("Coin"))coin=i;
+            require(coin>=0,"Coin preset missing");
+            presets.loadPreset(coin);presets.prepareToPlay(8000,128);
+            juce::AudioBuffer<float> coinAudio(2,128);juce::MidiBuffer coinMidi;
+            coinMidi.addEvent(juce::MidiMessage::noteOn(1,60,(juce::uint8)127),0);presets.processBlock(coinAudio,coinMidi);
+            require(coinAudio.getMagnitude(0,128)>0.f&&std::isfinite(coinAudio.getMagnitude(0,128)),"Preset recall produced silent or invalid audio");
+
+            auto stateBlock=[](RebitProcessor& processor){juce::MemoryBlock block;processor.getStateInformation(block);return block;};
+            RebitProcessor first,second,third;
+            first.loadPreset(0);first.randomize(12345,0);
+            second.loadPreset(0);second.randomize(12345,0);
+            third.loadPreset(0);third.randomize(12346,0);
+            const auto a=stateBlock(first);
+            const auto b=stateBlock(second);
+            const auto c=stateBlock(third);
+            require(a==b,"Same seed produced a different randomization");
+            require(a!=c,"Different seeds produced the same randomization");
+            for(int layer=0;layer<2;++layer)for(int lane=0;lane<3;++lane){
+                const auto text=first.sequenceText(lane,layer);
+                require(!text.isEmpty(),"Randomization left an empty sequence");
+                require(first.setSequenceText(lane,text,layer).isEmpty(),"Randomization generated an invalid sequence");
+            }
+
+            RebitProcessor locked;
+            locked.loadPreset(0);
+            auto* attack=locked.state.getParameter("attack");attack->setValueNotifyingHost(attack->convertTo0to1(.123f));
+            auto* gain=locked.state.getParameter("gain");gain->setValueNotifyingHost(gain->convertTo0to1(.32f));
+            juce::MemoryBlock before;locked.getStateInformation(before);
+            locked.randomize(777,2|32); // ENV and MIX locked
+            require(std::abs(locked.state.getRawParameterValue("attack")->load()-.123f)<.001f,"Locked envelope changed");
+            require(std::abs(locked.state.getRawParameterValue("gain")->load()-.32f)<.001f,"Locked mix changed");
+            juce::MemoryBlock after;locked.getStateInformation(after);
+            require(before!=after,"Randomization skipped every unlocked section");
+            locked.undo();
+            juce::MemoryBlock restored;locked.getStateInformation(restored);
+            require(restored==before,"Undo did not restore the pre-randomize state");
+
+            auto editor=std::unique_ptr<juce::AudioProcessorEditor>(presets.createEditor());
+            auto* browser=control<juce::ComboBox>(*editor,"Preset browser");
+            auto* randomize=control<juce::TextButton>(*editor,"Randomize");
+            auto* undo=control<juce::TextButton>(*editor,"Undo");
+            auto* seed=control<juce::TextEditor>(*editor,"Random seed");
+            auto* lockEnvelope=control<juce::ToggleButton>(*editor,"Lock ENV");
+            require(browser&&randomize&&undo&&seed&&lockEnvelope,"Preset/random editor controls missing");
+            require(browser->getNumItems()==presets.presetCount(),"Preset browser did not list every factory patch");
+            browser->setSelectedItemIndex(sub,juce::sendNotificationSync);
+            require(presets.state.getRawParameterValue("layerBEnabled")->load()>.5f,"Browser selection did not load a preset");
+            const auto attackBefore=presets.state.getRawParameterValue("attack")->load();
+            set("gain",.22f);
+            seed->setText("4242",false);lockEnvelope->setToggleState(true,juce::sendNotificationSync);
+            randomize->onClick();
+            require(std::abs(presets.state.getRawParameterValue("attack")->load()-attackBefore)<.001f,"Editor lock did not preserve the envelope");
+            require(std::abs(presets.state.getRawParameterValue("gain")->load()-.22f)>.0001f,"Editor randomize did not change an unlocked section");
+            undo->onClick();
+            require(std::abs(presets.state.getRawParameterValue("gain")->load()-.22f)<.001f,"Undo control did not restore the previous patch");
+        }
         RebitProcessor p;
         p.prepareToPlay(48000,128);
         juce::AudioBuffer<float> buffer(2,128);

@@ -38,7 +38,7 @@ juce_add_plugin(RebitRust
     IS_MIDI_EFFECT FALSE EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     AU_MAIN_TYPE kAudioUnitType_MusicDevice AU_SANDBOX_SAFE TRUE
     VST3_CATEGORIES Instrument Synth COPY_PLUGIN_AFTER_BUILD FALSE)
-target_sources(RebitRust PRIVATE native/PluginProcessor.cpp native/PluginEditor.cpp native/SequenceCanvas.cpp)
+target_sources(RebitRust PRIVATE native/PluginProcessor.cpp native/PluginEditor.cpp native/SequenceCanvas.cpp native/Presets.cpp)
 target_compile_definitions(RebitRust PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
 target_link_libraries(RebitRust PRIVATE rebit_rust_archive juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
