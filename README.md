@@ -48,8 +48,15 @@ Mac or create a universal build for **Apple Silicon and Intel**.
 ### 1. Build and open
 
 You'll need Rust/Cargo, CMake 3.22+, Xcode command-line tools, and the pinned
-JUCE source. Start from a checkout of this repository; the
-[build guide](MANUAL.md#build) includes JUCE setup and universal-build instructions.
+JUCE submodule. Clone with submodules, or initialize them in an existing
+checkout:
+
+```sh
+git clone --recurse-submodules https://github.com/romulloqueiroz/rebit.git
+# or: git submodule update --init --recursive
+```
+
+The [build guide](MANUAL.md#build) covers universal builds. Then:
 
 ```sh
 ./scripts/build.sh

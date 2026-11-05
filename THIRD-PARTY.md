@@ -9,9 +9,9 @@ The Rust crate uses only Rust's standard library and has no third-party crates.
 Rust distributions include their own applicable MIT/Apache-2.0 and third-party
 notices; preserve applicable dependency notices when distributing binaries.
 
-Native plugin builds use JUCE 8.0.12, vendored at `vendor/JUCE` from the official
-https://github.com/juce-framework/JUCE repository, commit
-29396c22c93392d6738e021b83196283d6e4d850. JUCE is used under its AGPLv3 option.
+Native plugin builds use JUCE 8.0.12 through the pinned `vendor/JUCE` git
+submodule from the official https://github.com/juce-framework/JUCE repository,
+commit 29396c22c93392d6738e021b83196283d6e4d850. JUCE is used under its AGPLv3 option.
 Its complete notices and bundled dependency licenses are in that checkout,
 including AudioUnitSDK and the VST3 SDK. Preserve the corresponding dependency
 source and notices when redistributing. This stock checkout does not need the

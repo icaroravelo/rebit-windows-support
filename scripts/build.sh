@@ -2,14 +2,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 universal=0
+has_custom_juce=0
 cmake_args=()
 for arg in "$@"; do
     if [[ "$arg" == "--universal" ]]; then
         universal=1
     else
         cmake_args+=("$arg")
+        [[ "$arg" == -DJUCE_PATH=* ]] && has_custom_juce=1
     fi
 done
+if [[ -z "${REBIT_JUCE_PATH:-}" && $has_custom_juce -eq 0 && ! -f vendor/JUCE/CMakeLists.txt ]]; then
+    printf 'JUCE submodule is missing. Run:\n  git submodule update --init --recursive\n'
+    exit 1
+fi
 cargo_cmd=(cargo)
 arch_args=(-DCMAKE_OSX_ARCHITECTURES="$(uname -m)" -DCARGO_EXECUTABLE="$(command -v cargo)")
 if (( universal )); then

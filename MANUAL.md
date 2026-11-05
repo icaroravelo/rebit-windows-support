@@ -290,16 +290,17 @@ third-party Rust crates or network access are needed for the plugin itself.
 ./scripts/build.sh --universal  # arm64 + x86_64
 ```
 
-The default JUCE source is the pinned 8.0.12 checkout in `vendor/JUCE`. Native
-builds are independent of the old project. If your checkout does not include
-`vendor/JUCE`, fetch the pinned source before building:
+The default JUCE source is the pinned 8.0.12 git submodule in `vendor/JUCE`.
+Clone with submodules, or initialize them in an existing checkout:
 
 ```sh
-git clone --no-checkout https://github.com/juce-framework/JUCE.git vendor/JUCE
-git -C vendor/JUCE checkout 29396c22c93392d6738e021b83196283d6e4d850
+git clone --recurse-submodules https://github.com/romulloqueiroz/rebit.git
+# or, in an existing checkout:
+git submodule update --init --recursive
 ```
 
-To use another JUCE 8 checkout:
+Native builds are independent of the old project. To use another JUCE 8
+checkout:
 
 ```
 ./scripts/build.sh -DJUCE_PATH=/absolute/path/to/JUCE
