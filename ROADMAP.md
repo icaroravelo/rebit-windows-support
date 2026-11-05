@@ -198,5 +198,21 @@ Native checks cover preset categories and recall, sequence-bearing presets,
 user preset save/load/overwrite/delete, temporary-directory cleanup,
 deterministic same-seed output, different-seed output, locked sections, undo,
 valid randomized sequence text, editor save/delete controls and undo
-restoration. The AU, VST3 and standalone builds pass; the installed AU signature verifies and Apple
-AU validation succeeds. The original C++ Rebit remains unchanged.
+restoration. The AU, VST3 and standalone builds pass; the installed AU
+signature verifies and Apple AU validation succeeds. The original C++ Rebit remains unchanged.
+
+## Release hardening: universal build
+
+Completed 2026-11-05. Added `./scripts/build.sh --universal`, which builds Rust
+for `aarch64-apple-darwin` and `x86_64-apple-darwin`, merges the static archives
+with `lipo`, and configures CMake/JUCE for `arm64;x86_64`. The script finds a
+rustup Cargo and defaults to toolchain 1.97.1; `REBIT_RUST_TOOLCHAIN` and
+`REBIT_RUSTUP` override that choice. A normal build resets to the host
+architecture.
+
+The universal AU, VST3, standalone, and Rust archive contain both slices. All
+four CTest groups pass in the universal configuration. The x86_64 processor,
+VST3 host, and AU host checks pass under Rosetta. The universal AU is installed
+and native Apple AU validation succeeds. Signing and notarization remain
+optional release work requiring Apple Developer credentials; builds stay ad-hoc
+signed until then.

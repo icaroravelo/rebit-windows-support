@@ -277,10 +277,11 @@ identities differ from Rebit's, so both versions can coexist.
 ## Build
 
 Requires Rust/Cargo, CMake 3.22+, and Xcode command-line tools on macOS. No
-third-party Rust crates or network access are needed.
+third-party Rust crates or network access are needed for the plugin itself.
 
 ```
-./scripts/build.sh
+./scripts/build.sh              # current Mac architecture
+./scripts/build.sh --universal  # arm64 + x86_64
 ```
 
 The default JUCE source is the pinned 8.0.12 checkout in `vendor/JUCE`. Native
@@ -290,10 +291,23 @@ builds are independent of the old project. To use another JUCE 8 checkout:
 ./scripts/build.sh -DJUCE_PATH=/absolute/path/to/JUCE
 ```
 
-Builds target the current Mac architecture (the verified local build is arm64).
-Universal/x86_64 cross-build automation is not provided yet; CMake rejects an
-architecture override rather than silently linking an incompatible Rust archive.
-Builds are locally ad-hoc signed, not notarized.
+Universal builds need a Cargo that has both macOS standard libraries. Homebrew
+Rust is host-only, so install rustup and the two targets once:
+
+```
+brew install rustup
+rustup toolchain install 1.97.1 --profile minimal \
+    --target aarch64-apple-darwin,x86_64-apple-darwin
+```
+
+`--universal` builds one Rust archive per architecture, merges them with `lipo`,
+and configures CMake/JUCE for `arm64;x86_64`. It uses toolchain `1.97.1` by
+default; override with `REBIT_RUST_TOOLCHAIN` or point `REBIT_RUSTUP` at a
+rustup binary. The verified universal build contains both slices in the AU,
+VST3, standalone, and Rust archive.
+
+Both native and universal builds use the same `build` directory and are locally
+ad-hoc signed, not notarized.
 
 The Rust core and offline renderer also work independently of JUCE:
 

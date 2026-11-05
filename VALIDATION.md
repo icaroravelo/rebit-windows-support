@@ -34,10 +34,10 @@ cargo clippy --offline --locked --all-targets -- -D warnings
 cargo run --release --offline --locked --bin rebit-render -- demo.wav pulse
 ```
 
-Remaining work includes AU runtime validation outside this restricted session,
-more DAW coverage, Intel/universal builds, notarization, listening tests, and
-performance profiling. No measured speedup or sample-identity claim is made.
-The original C++ implementation and installed plugins were not modified.
+Remaining work includes broader DAW coverage, Developer ID signing and
+notarization, listening tests, and performance profiling. No measured speedup or
+sample-identity claim is made. The original C++ implementation and installed
+plugins were not modified.
 
 ## Installed AU validation after permission update
 
@@ -574,3 +574,31 @@ seed is an editing aid and is not stored in the plugin state. Randomization
 does not touch arpeggiator or MPE settings, and there is no MIDI-learn for
 macros. No listening test or DAW UI interaction test was performed. The original
 C++ Rebit remains unchanged.
+
+
+## Universal build, 2026-11-05
+
+Added universal macOS build support. CMake now builds one Rust archive per
+requested architecture and merges them with `lipo`; JUCE and the plugin
+targets are configured for `arm64;x86_64`. The build script gained
+`--universal`, which uses a rustup Cargo with both macOS standard libraries
+installed. `scripts/build.sh` without the flag resets to the host architecture.
+
+Tooling used locally: Homebrew `rustup` 1.29.3 and Rust 1.97.1 with
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets.
+
+- `./scripts/build.sh --universal`: passed. Rust archive, AU, VST3, and
+  standalone all report `x86_64 arm64` from `lipo -archs`.
+- All four CTest groups passed in the universal configuration.
+- The universal processor checks, VST3 host test, and AU host test passed when
+  run as x86_64 under Rosetta: `arch -x86_64 ...`.
+- The universal AU was installed; its signature verifies and native
+  `auval -v aumu RbR1 Rbit` reports **AU VALIDATION SUCCEEDED**.
+- `arch -x86_64 auval` did not expose the installed AUv2 component in this
+  Rosetta session, so no x86_64 auval claim is made. The direct x86_64 AU host
+  test above did instantiate, render, and recall state successfully.
+- Native arm64 build and tests still pass after switching back from universal.
+
+Limits: x86_64 was tested through Rosetta on Apple Silicon, not on Intel
+hardware. Builds remain ad-hoc signed and are not notarized; Developer ID
+signing and notarization are still pending.
