@@ -641,14 +641,42 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     effectKnobs[2]->slider.setTooltip("Stereo-linked sample-and-hold. 1x is neutral; 4x holds each captured sample for four host samples. Effective rate is host sample rate / divider.");
     effectKnobs[3]->slider.setTooltip("Blend dry and processed output. FX off always returns the dry signal after its short transition.");
     presetBox.setName("Preset browser");presetBox.setColour(accentColourId,mint);
-    presetBox.setTooltip("Factory patches. Selecting a preset resets the sound and sequences, then loads the patch. Use UNDO to return to the previous patch.");
+    presetBox.setTooltip("Factory and user patches. Selecting a preset resets the sound and sequences, then loads the patch. Use UNDO to return to the previous patch.");
     presetPrev.setName("Previous preset");presetNext.setName("Next preset");
     presetPrev.getProperties().set("sequenceSmall",true);presetNext.getProperties().set("sequenceSmall",true);
     presetPrev.setColour(accentColourId,mint);presetNext.setColour(accentColourId,mint);
+    presetName.setName("User preset name");presetName.setTextToShowWhenEmpty("User preset name",muted.withAlpha(.55f));
+    presetName.setFont(type(11,true));presetName.setIndents(8,5);
+    presetName.setTooltip("Name for a user preset. SAVE writes the complete current patch to the user preset folder.");
+    savePreset.setName("Save user preset");savePreset.getProperties().set("sequenceSmall",true);savePreset.setColour(accentColourId,mint);
+    savePreset.setTooltip("Save the complete current patch as a user preset. Existing presets with the same name are overwritten.");
+    deletePreset.setName("Delete user preset");deletePreset.getProperties().set("sequenceSmall",true);deletePreset.setColour(accentColourId,amber);
+    deletePreset.setTooltip("Delete the selected user preset file. Factory presets cannot be deleted.");
+    deletePreset.setEnabled(false);
     presetStatus.setFont(type(10,true));presetStatus.setColour(juce::Label::textColourId,muted);
-    presetStatus.setText("Factory presets. Select a patch to load; UNDO restores the previous patch.",juce::dontSendNotification);
+    presetStatus.setText("Factory and user presets. Select a patch to load; UNDO restores the previous patch.",juce::dontSendNotification);
+    auto savePresetAction=[this]{
+        const auto index=instrument.saveUserPreset(presetName.getText());
+        if(index<0){presetStatus.setText("Could not save user preset.",juce::dontSendNotification);return;}
+        refreshPresets();loadingPreset=true;presetBox.setSelectedItemIndex(index,juce::dontSendNotification);loadingPreset=false;
+        presetStatus.setText("Saved "+presetBox.getText()+".",juce::dontSendNotification);
+        deletePreset.setEnabled(true);presetName.clear();
+    };
+    savePreset.onClick=savePresetAction;presetName.onReturnKey=savePresetAction;
+    deletePreset.onClick=[this]{
+        const auto index=presetBox.getSelectedItemIndex();
+        if(index<0||!instrument.isUserPreset(index))return;
+        if(instrument.deleteUserPreset(index)){
+            refreshPresets();loadingPreset=true;
+            presetBox.setSelectedItemIndex(juce::jmax(0,juce::jmin(index,presetBox.getNumItems()-1)),juce::dontSendNotification);
+            loadingPreset=false;
+            presetStatus.setText("Deleted user preset. The current sound is unchanged.",juce::dontSendNotification);
+            deletePreset.setEnabled(instrument.isUserPreset(presetBox.getSelectedItemIndex()));
+        }else presetStatus.setText("Could not delete user preset.",juce::dontSendNotification);
+    };
+    addAndMakeVisible(presetName);addAndMakeVisible(savePreset);addAndMakeVisible(deletePreset);
     refreshPresets();
-    presetBox.onChange=[this]{if(loadingPreset)return;const auto index=presetBox.getSelectedItemIndex();if(index>=0){instrument.loadPreset(index);presetStatus.setText("Loaded "+presetBox.getText(),juce::dontSendNotification);undoButton.setEnabled(true);}};
+    presetBox.onChange=[this]{if(loadingPreset)return;const auto index=presetBox.getSelectedItemIndex();if(index>=0){instrument.loadPreset(index);presetStatus.setText("Loaded "+presetBox.getText(),juce::dontSendNotification);undoButton.setEnabled(true);deletePreset.setEnabled(instrument.isUserPreset(index));}};
     presetPrev.onClick=[this]{if(presetBox.getNumItems()==0)return;presetBox.setSelectedItemIndex(juce::jmax(0,presetBox.getSelectedItemIndex()-1),juce::sendNotificationSync);};
     presetNext.onClick=[this]{if(presetBox.getNumItems()==0)return;presetBox.setSelectedItemIndex(juce::jmin(presetBox.getNumItems()-1,presetBox.getSelectedItemIndex()+1),juce::sendNotificationSync);};
     addAndMakeVisible(presetBox);addAndMakeVisible(presetPrev);addAndMakeVisible(presetNext);addAndMakeVisible(presetStatus);
@@ -693,6 +721,7 @@ void RebitEditor::refreshPresets() {
     for(int i=0;i<instrument.presetCount();++i)presetBox.addItem(instrument.presetLabel(i),i+1);
     if(selected>=0&&selected<presetBox.getNumItems())presetBox.setSelectedItemIndex(selected,juce::dontSendNotification);
     else if(presetBox.getNumItems()>0)presetBox.setSelectedItemIndex(0,juce::dontSendNotification);
+    deletePreset.setEnabled(instrument.isUserPreset(presetBox.getSelectedItemIndex()));
     loadingPreset=false;
 }
 
@@ -807,6 +836,7 @@ void RebitEditor::timerCallback()
     knobs[bend]->setEnabled(!mpeOn.getToggleState());
     for(auto& knob:effectKnobs)if(knob)knob->setEnabled(effectsOn.getToggleState());
     undoButton.setEnabled(instrument.canUndo());
+    deletePreset.setEnabled(instrument.isUserPreset(presetBox.getSelectedItemIndex()));
     repaint(1120,532,176,272);
     midiActive = false;
     for (int note = 0; note < 128; ++note)
@@ -978,6 +1008,7 @@ void RebitEditor::resized()
     presetBox.setBounds(40,855,360,32);
     presetPrev.setBounds(408,855,42,32);presetNext.setBounds(456,855,42,32);
     presetStatus.setBounds(40,893,450,20);
+    presetName.setBounds(40,925,260,28);savePreset.setBounds(308,925,76,28);deletePreset.setBounds(392,925,56,28);
     seedEditor.setBounds(520,855,110,30);newSeed.setBounds(638,855,64,30);
     for(int i=0;i<6;++i)randomLocks[(size_t)i].setBounds(720+i*62,855,58,22);
     randomizeButton.setBounds(1110,849,130,34);undoButton.setBounds(1110,889,130,30);

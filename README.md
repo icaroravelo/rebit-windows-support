@@ -31,8 +31,9 @@ See `preview.png` for the default patch, `preview-showcase.png` for a populated
 patch, `preview-layer-b.png` for B's controls, `preview-colour.png` for Clean/FX,
 `preview-mod.png` for the route matrix, `preview-lfo.png` for LFO sources,
 `preview-macros.png` for macros and MPE, `preview-presets.png` for the preset
-browser, `preview-random.png` for seeded randomization with a locked envelope,
-and `preview-clipping.png` for output above full scale with a releasing voice.
+browser, `preview-user.png` for a loaded user preset, `preview-random.png` for
+seeded randomization with a locked envelope, and `preview-clipping.png` for
+output above full scale with a releasing voice.
 All are rendered from the actual editor and audio processor; preview patches do
 not change defaults.
 
@@ -214,12 +215,20 @@ and `preview-macros.png`.
 
 ### Presets and musical randomization
 
-Section **07 PRESETS / RANDOM** holds the factory browser and randomization
-controls. The browser starts with **Init** and includes bass, lead, percussion,
-game-effect and pad patches, for example **Sub Pulse**, **Rubber Bass**,
-**Wobble**, **Arcade Lead**, **Glide Lead**, **Noise Hat**, **Chip Kick**,
-**Coin**, **Laser**, **Power Up** and **Wide Layers**. Select a patch with the
-list or the previous/next buttons.
+Section **07 PRESETS / RANDOM** holds the preset browser and randomization
+controls. The factory list starts with **Init** and includes bass, lead,
+percussion, game-effect and pad patches, for example **Sub Pulse**, **Rubber
+Bass**, **Wobble**, **Arcade Lead**, **Glide Lead**, **Noise Hat**, **Chip
+Kick**, **Coin**, **Laser**, **Power Up** and **Wide Layers**. Select a patch
+with the list or the previous/next buttons.
+
+To save the current sound, type a name in **USER PRESET NAME** and press
+**SAVE** (or Return). The complete version-4 state is written to
+`~/Library/Application Support/Rebit Audio/Rebit Rust/Presets/<name>.rebitrust`
+and appears in the list under **User - <name>**. Saving does not change the
+sound; loading is undoable. **DEL** removes the selected user preset, while
+factory presets are protected. Existing user presets with the same name are
+overwritten.
 
 Loading a preset first returns every parameter and both sequence banks to their
 defaults, then applies the patch. This makes recall complete and repeatable;

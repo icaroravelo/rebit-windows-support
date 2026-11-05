@@ -531,11 +531,15 @@ listening test was performed. The original C++ Rebit remains unchanged.
 
 ## Milestone 9: presets and musical randomization, 2026-11-05
 
-Added a factory preset browser with 12 patches across Init, Bass, Lead,
-Percussion, Game and Pad. Selection loads a complete patch after resetting all
-parameters and both sequence banks; previous/next buttons browse the same list.
-Preset loads are undoable. The sequence-bearing Noise Hat and Power Up presets
-were checked to load valid text and lane enables.
+Added a factory and user preset browser with 12 built-in patches across Init,
+Bass, Lead, Percussion, Game and Pad. Selection loads a complete patch after
+resetting all parameters and both sequence banks; previous/next buttons browse
+the same list. Preset loads are undoable. The sequence-bearing Noise Hat and
+Power Up presets were checked to load valid text and lane enables. User presets
+save the complete current state as `.rebitrust` files under
+`~/Library/Application Support/Rebit Audio/Rebit Rust/Presets`, appear as
+`User - <name>`, can be overwritten by name, and can be deleted while factory
+patches remain protected.
 
 Added deterministic seeded randomization with six lock sections: oscillator,
 envelope, sequences, modulation, effects and mix. Unlocked sections randomize
@@ -550,19 +554,23 @@ stack. The editor opens at 1320x1080 with a new PRESETS / RANDOM panel.
   the existing modulation/allocation tests continue to pass.
 - `cargo clippy --offline --locked --all-targets -- -D warnings`: passed.
 - All four CTest groups passed. Native checks cover factory categories and
-  labels, full preset recall, a sequence-bearing preset, same-seed determinism
+  labels, full preset recall, a sequence-bearing preset, user preset
+  save/load/overwrite/delete, temporary-directory cleanup, same-seed determinism
   (byte-identical state), different-seed divergence, locked envelope/mix
   sections, randomized sequence validity, undo restoration after preset load
-  and randomization, and real-editor preset/seed/lock/randomize/undo controls.
+  and randomization, and real-editor preset/seed/lock/randomize/save/delete/
+  undo controls.
 - Release AU, VST3 and standalone builds succeeded. The installed AU signature
   verifies and `auval -v aumu RbR1 Rbit` reports **AU VALIDATION SUCCEEDED**.
 - Actual-editor previews were rendered and inspected: `preview-presets.png`
-  (factory browser) and `preview-random.png` (seeded randomize with ENV locked,
-  status text, random sequence and controls). Earlier previews were refreshed
-  for the 1320x1080 layout.
+  (factory browser and save row), `preview-user.png` (a loaded user preset),
+  and `preview-random.png` (seeded randomize with ENV locked, status text,
+  random sequence and controls). Earlier previews were refreshed for the
+  1320x1080 layout.
 
-Limits: the browser includes factory presets only; user preset save/load is not
-part of this milestone. The random seed is an editing aid and is not stored in
-the plugin state. Randomization does not touch arpeggiator or MPE settings, and
-there is no MIDI-learn for macros. No listening test or DAW UI interaction test
-was performed. The original C++ Rebit remains unchanged.
+Limits: user presets are plain files in the standard Application Support folder;
+there is no import/export or custom-folder chooser in the editor. The random
+seed is an editing aid and is not stored in the plugin state. Randomization
+does not touch arpeggiator or MPE settings, and there is no MIDI-learn for
+macros. No listening test or DAW UI interaction test was performed. The original
+C++ Rebit remains unchanged.

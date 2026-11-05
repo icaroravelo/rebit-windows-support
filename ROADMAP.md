@@ -171,10 +171,14 @@ and `preview-macros.png`; the eight-second demo is
 
 ## Milestone 9 delivery
 
-Completed 2026-11-05. Added a factory preset browser with 12 patches across
-Init, Bass, Lead, Percussion, Game and Pad categories, previous/next selection,
-and undoable loads. Preset loads return all parameters and both sequence banks
-to defaults before applying the patch, so recall is complete and repeatable.
+Completed 2026-11-05. Added a factory and user preset browser with 12 built-in
+patches across Init, Bass, Lead, Percussion, Game and Pad categories,
+previous/next selection, and undoable loads. Preset loads return all parameters
+and both sequence banks to defaults before applying the patch, so recall is
+complete and repeatable. **SAVE** writes the complete current state to
+`~/Library/Application Support/Rebit Audio/Rebit Rust/Presets`; user patches
+appear under **User - <name>**, can be overwritten by name, and **DEL** removes
+the selected user file while protecting factory patches.
 
 Added seeded randomization with six independent locks: oscillator, envelope,
 sequences, modulation, effects and mix. The same starting patch, seed and locks
@@ -186,12 +190,13 @@ stay under performance control.
 
 Both preset loads and randomizations push a bounded eight-entry undo stack. The
 editor gains a 150-pixel PRESETS / RANDOM panel and now opens at 1320x1080; the
-keyboard and footer moved down to match. Previews are `preview-presets.png` and
-`preview-random.png`.
+keyboard and footer moved down to match. Previews are `preview-presets.png`,
+`preview-user.png` and `preview-random.png`.
 
 105 Rust tests, Clippy with warnings denied, and all four CTest groups pass.
 Native checks cover preset categories and recall, sequence-bearing presets,
+user preset save/load/overwrite/delete, temporary-directory cleanup,
 deterministic same-seed output, different-seed output, locked sections, undo,
-valid randomized sequence text, editor controls and undo restoration. The AU,
-VST3 and standalone builds pass; the installed AU signature verifies and Apple
+valid randomized sequence text, editor save/delete controls and undo
+restoration. The AU, VST3 and standalone builds pass; the installed AU signature verifies and Apple
 AU validation succeeds. The original C++ Rebit remains unchanged.

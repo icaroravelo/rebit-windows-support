@@ -344,6 +344,53 @@ int main() {
             undo->onClick();
             require(std::abs(presets.state.getRawParameterValue("gain")->load()-.22f)<.001f,"Undo control did not restore the previous patch");
         }
+        {
+            auto tempDirectory=[]{
+                return juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(
+                    "rebit-rust-user-preset-"+juce::String::toHexString(juce::Time::currentTimeMillis())
+                    +"-"+juce::String(juce::Random::getSystemRandom().nextInt(100000)));
+            };
+            const auto directory=tempDirectory();directory.deleteRecursively();
+            RebitProcessor users;users.setUserPresetDirectory(directory);
+            const auto factoryCount=users.presetCount();
+            auto set=[&](const char* id,float value){auto* p=users.state.getParameter(id);require(p!=nullptr,"Missing user preset parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};
+            set("gain",.25f);set("attack",.123f);
+            const auto saved=users.saveUserPreset("My Test Patch");
+            require(saved>=factoryCount&&users.presetCount()==factoryCount+1,"User preset was not saved");
+            require(users.isUserPreset(saved)&&users.presetLabel(saved).contains("User")&&users.presetLabel(saved).contains("My Test Patch"),"User preset label is incorrect");
+            require(directory.getNumberOfChildFiles(juce::File::findFiles,"*.rebitrust")==1,"User preset file missing");
+            set("gain",.5f);users.loadPreset(saved);
+            require(std::abs(users.state.getRawParameterValue("gain")->load()-.25f)<.001f,"User preset did not load its state");
+            require(users.canUndo(),"User preset load did not create an undo snapshot");
+            users.undo();require(std::abs(users.state.getRawParameterValue("gain")->load()-.5f)<.001f,"Undo after user preset load failed");
+            set("gain",.4f);
+            const auto overwritten=users.saveUserPreset("My Test Patch");
+            require(overwritten==saved&&users.presetCount()==factoryCount+1,"User preset overwrite changed the list");
+            set("gain",.9f);users.loadPreset(saved);
+            require(std::abs(users.state.getRawParameterValue("gain")->load()-.4f)<.001f,"Overwritten user preset did not load");
+            users.undo();
+            const auto second=users.saveUserPreset("Another Patch");
+            require(second>=factoryCount&&users.presetCount()==factoryCount+2,"Second user preset was not saved");
+            require(users.deleteUserPreset(second)&&users.presetCount()==factoryCount+1,"User preset delete failed");
+            require(!users.deleteUserPreset(0),"Factory preset was deleted");
+            directory.deleteRecursively();
+
+            const auto uiDirectory=tempDirectory();uiDirectory.deleteRecursively();
+            RebitProcessor ui;ui.setUserPresetDirectory(uiDirectory);
+            const auto uiFactory=ui.presetCount();
+            auto editor=std::unique_ptr<juce::AudioProcessorEditor>(ui.createEditor());
+            auto* name=control<juce::TextEditor>(*editor,"User preset name");
+            auto* save=control<juce::TextButton>(*editor,"Save user preset");
+            auto* remove=control<juce::TextButton>(*editor,"Delete user preset");
+            auto* browser=control<juce::ComboBox>(*editor,"Preset browser");
+            require(name&&save&&remove&&browser,"User preset editor controls missing");
+            name->setText("UI Patch",false);save->onClick();
+            require(ui.presetCount()==uiFactory+1&&browser->getNumItems()==uiFactory+1,"Editor save did not add a user preset");
+            require(browser->getText().contains("UI Patch")&&remove->isEnabled(),"Saved user preset was not selected or deletable");
+            remove->onClick();
+            require(ui.presetCount()==uiFactory&&browser->getNumItems()==uiFactory,"Editor delete did not remove the user preset");
+            uiDirectory.deleteRecursively();
+        }
         RebitProcessor p;
         p.prepareToPlay(48000,128);
         juce::AudioBuffer<float> buffer(2,128);

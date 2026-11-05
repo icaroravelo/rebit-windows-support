@@ -13,6 +13,7 @@ int main(int argc,char** argv) {
     const bool lfoPage=mode=="--lfo";
     const bool macroPage=mode=="--macros";
     const bool randomPage=mode=="--random";
+    const bool userPage=mode=="--user";
     const bool dual=colour||modPage||lfoPage||macroPage||mode=="--showcase"||mode=="--layer-b";
     if(dual) {
         auto set=[&](const char* id,float value){if(auto* p=processor->state.getParameter(id))p->setValueNotifyingHost(p->convertTo0to1(value));};
@@ -47,6 +48,14 @@ int main(int argc,char** argv) {
         for(int note:{0,1,2})midi.addEvent(juce::MidiMessage::noteOn(1,note,(juce::uint8)127),0);
         midi.addEvent(juce::MidiMessage::noteOff(1,0),32);processor->processBlock(audio,midi);
     }
+    juce::File userPreviewDirectory;
+    if(userPage){
+        userPreviewDirectory=juce::File::getSpecialLocation(juce::File::tempDirectory)
+            .getChildFile("rebit-rust-preview-user-presets");
+        userPreviewDirectory.deleteRecursively();
+        processor->setUserPresetDirectory(userPreviewDirectory);
+        processor->saveUserPreset("Neon Bass");
+    }
     auto editor=std::unique_ptr<juce::AudioProcessorEditor>(processor->createEditor());
     if(argc>2&&juce::String(argv[2])=="--layer-b")for(auto* child:editor->getChildren())
         if(child->getName()=="Edit layer B")if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();
@@ -54,6 +63,12 @@ int main(int argc,char** argv) {
     if(modPage||lfoPage||macroPage)clickPage("Modulation page");
     if(lfoPage)clickPage("LFO page");
     if(macroPage)clickPage("Macros page");
+    if(userPage){
+        for(auto* child:editor->getChildren())
+            if(child->getName()=="Preset browser")
+                if(auto* box=dynamic_cast<juce::ComboBox*>(child))
+                    box->setSelectedItemIndex(box->getNumItems()-1,juce::sendNotificationSync);
+    }
     if(randomPage){
         for(auto* child:editor->getChildren()){
             if(child->getName()=="Random seed")if(auto* field=dynamic_cast<juce::TextEditor*>(child))field->setText("20261105",false);
@@ -69,4 +84,5 @@ int main(int argc,char** argv) {
     juce::PNGImageFormat png;
     if(!stream.openedOk()||!png.writeImageToStream(image,stream))return 1;
     std::cout<<output.getFullPathName()<<std::endl;
+    if(userPreviewDirectory != juce::File()) userPreviewDirectory.deleteRecursively();
 }

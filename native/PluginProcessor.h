@@ -52,6 +52,11 @@ public:
     int presetCount() const;
     juce::String presetLabel(int) const;
     void loadPreset(int);
+    int saveUserPreset(const juce::String& name);
+    bool deleteUserPreset(int index);
+    bool isUserPreset(int index) const;
+    void setUserPresetDirectory(const juce::File& directory);
+    juce::File getUserPresetDirectory() const { return userPresetDirectory; }
     void randomize(uint32_t seed,int lockedSections);
     void undo();
     bool canUndo() const { return !undoStack.empty(); }
@@ -64,6 +69,7 @@ private:
     void setParameterValue(const char*,float);
     void resetToDefaults();
     void pushUndo();
+    void refreshUserPresets();
     void readParameters(bool readTransport=true);
     void midi(const juce::MidiMessage&);
     void publishPlayback(); // Audio thread, or prepare before processing starts.
@@ -89,5 +95,7 @@ private:
     std::atomic<uint32_t> playbackIdleAfterMs {250};
     std::atomic<bool> resetRequested{false};
     std::vector<juce::MemoryBlock> undoStack; // Message thread only, bounded below.
+    juce::File userPresetDirectory;
+    std::vector<juce::File> userPresetFiles; // Message thread only.
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RebitProcessor)
 };

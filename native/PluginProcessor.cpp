@@ -1,9 +1,14 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Presets.h"
+#include <algorithm>
 #include <array>
 
 namespace {
+juce::File defaultPresetDirectory() {
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("Rebit Audio").getChildFile ("Rebit Rust").getChildFile ("Presets");
+}
 struct DeterministicRandom {
     uint32_t state;
     explicit DeterministicRandom (uint32_t seed) : state (seed ? seed : 0x9e3779b9u) {}
@@ -93,6 +98,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout RebitProcessor::layout() {
 RebitProcessor::RebitProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output",juce::AudioChannelSet::stereo(),true)),
       state(*this,nullptr,"RebitRustParams",layout()), engines{{rebit_engine_new(),rebit_engine_new_seeded(0xcc7530ed)}}, mixer(rebit_mixer_new()), canonical{{rebit_bank_new(),rebit_bank_new()}} {
+    userPresetDirectory=defaultPresetDirectory();
+    refreshUserPresets();
     parameterValues.reserve((size_t)getParameters().size());
     for(auto* parameter:getParameters())if(auto* identified=dynamic_cast<juce::AudioProcessorParameterWithID*>(parameter))
         parameterValues.emplace(identified->paramID.toRawUTF8(),state.getRawParameterValue(identified->paramID));
@@ -287,17 +294,43 @@ void RebitProcessor::pushUndo() {
     if (undoStack.size() >= 8) undoStack.erase (undoStack.begin());
     undoStack.push_back (std::move (snapshot));
 }
-int RebitProcessor::presetCount() const { return (int) factoryPresets().size(); }
+void RebitProcessor::refreshUserPresets() {
+    userPresetFiles.clear();
+    if (userPresetDirectory.isDirectory()) {
+        const auto found = userPresetDirectory.findChildFiles (juce::File::findFiles, false, "*.rebitrust");
+        userPresetFiles.assign (found.begin(), found.end());
+    }
+    std::sort (userPresetFiles.begin(), userPresetFiles.end(), [] (const auto& a, const auto& b) {
+        return a.getFileName().compareIgnoreCase (b.getFileName()) < 0;
+    });
+}
+int RebitProcessor::presetCount() const { return (int) factoryPresets().size() + (int) userPresetFiles.size(); }
+bool RebitProcessor::isUserPreset (int index) const {
+    const int factorySize = (int) factoryPresets().size();
+    return index >= factorySize && index < presetCount();
+}
 juce::String RebitProcessor::presetLabel (int index) const {
     const auto& presets = factoryPresets();
-    if (index < 0 || index >= (int) presets.size()) return {};
-    const auto& preset = presets[(size_t) index];
-    if (preset.category == preset.name) return juce::String (preset.name);
-    return juce::String (preset.category) + " \xe2\x80\x94 " + juce::String (preset.name);
+    if (index >= 0 && index < (int) presets.size()) {
+        const auto& preset = presets[(size_t) index];
+        if (preset.category == preset.name) return juce::String (preset.name);
+        return juce::String (preset.category) + " - " + juce::String (preset.name);
+    }
+    const int userIndex = index - (int) presets.size();
+    if (userIndex < 0 || userIndex >= (int) userPresetFiles.size()) return {};
+    return "User - " + userPresetFiles[(size_t) userIndex].getFileNameWithoutExtension();
 }
 void RebitProcessor::loadPreset (int index) {
     const auto& presets = factoryPresets();
-    if (index < 0 || index >= (int) presets.size()) return;
+    if (index < 0 || index >= presetCount()) return;
+    if (index >= (int) presets.size()) {
+        const auto file = userPresetFiles[(size_t) (index - (int) presets.size())];
+        juce::MemoryBlock snapshot;
+        if (!file.loadFileAsData (snapshot)) return;
+        pushUndo();
+        setStateInformation (snapshot.getData(), (int) snapshot.getSize());
+        return;
+    }
     const auto& preset = presets[(size_t) index];
     pushUndo();
     resetToDefaults();
@@ -312,6 +345,34 @@ void RebitProcessor::loadPreset (int index) {
         }
     }
     resetRequested.store (true);
+}
+int RebitProcessor::saveUserPreset (const juce::String& name) {
+    auto cleaned = name.trim();
+    if (cleaned.isEmpty()) cleaned = "User Preset";
+    auto legal = juce::File::createLegalFileName (cleaned);
+    if (legal.isEmpty()) legal = "User Preset";
+    if (userPresetDirectory.createDirectory().failed()) return -1;
+    const auto file = userPresetDirectory.getChildFile (legal + ".rebitrust");
+    juce::MemoryBlock snapshot;
+    getStateInformation (snapshot);
+    if (!file.replaceWithData (snapshot.getData(), snapshot.getSize())) return -1;
+    refreshUserPresets();
+    const int factorySize = (int) factoryPresets().size();
+    for (int i = 0; i < (int) userPresetFiles.size(); ++i)
+        if (userPresetFiles[(size_t) i] == file) return factorySize + i;
+    return -1;
+}
+bool RebitProcessor::deleteUserPreset (int index) {
+    const int factorySize = (int) factoryPresets().size();
+    if (index < factorySize || index >= presetCount()) return false;
+    const auto file = userPresetFiles[(size_t) (index - factorySize)];
+    if (!file.deleteFile()) return false;
+    refreshUserPresets();
+    return true;
+}
+void RebitProcessor::setUserPresetDirectory (const juce::File& directory) {
+    userPresetDirectory = directory;
+    refreshUserPresets();
 }
 void RebitProcessor::undo() {
     if (undoStack.empty()) return;

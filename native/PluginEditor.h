@@ -64,6 +64,8 @@ private:
     std::unique_ptr<Knob> mpeBend;
     juce::ComboBox presetBox;
     juce::TextButton presetPrev { "<" }, presetNext { ">" };
+    juce::TextEditor presetName;
+    juce::TextButton savePreset { "SAVE" }, deletePreset { "DEL" };
     juce::Label presetStatus;
     juce::TextEditor seedEditor;
     juce::TextButton newSeed { "NEW" }, randomizeButton { "RANDOMIZE" }, undoButton { "UNDO" };
