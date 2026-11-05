@@ -7,8 +7,12 @@ int main(int argc,char** argv) {
     auto processor=std::make_unique<RebitProcessor>();
     // Optional display state for visual QA; plugin defaults and saved patches
     // are unaffected. Every displayed control still uses its real attachment.
-    const bool colour=argc>2&&juce::String(argv[2])=="--colour";
-    const bool dual=colour||(argc>2&&(juce::String(argv[2])=="--showcase"||juce::String(argv[2])=="--layer-b"));
+    const auto mode=argc>2?juce::String(argv[2]):juce::String{};
+    const bool colour=mode=="--colour";
+    const bool modPage=mode=="--mod";
+    const bool lfoPage=mode=="--lfo";
+    const bool macroPage=mode=="--macros";
+    const bool dual=colour||modPage||lfoPage||macroPage||mode=="--showcase"||mode=="--layer-b";
     if(dual) {
         auto set=[&](const char* id,float value){if(auto* p=processor->state.getParameter(id))p->setValueNotifyingHost(p->convertTo0to1(value));};
         host.set(0.,120.,true);processor->setPlayHead(&host);set("hostSync",1);set("sequenceClock",4);
@@ -20,6 +24,12 @@ int main(int argc,char** argv) {
         processor->setSequenceText(0,"15[12,9,12]|6,3,0",1);processor->setSequenceText(1,"[0,-12,0,7]|0",1);
         set("layerBVolumeEnabled",1);set("layerBPitchEnabled",1);
         if(colour){set("layerASoundMode",1);set("layerBSoundMode",1);set("fxEnabled",1);set("fxDrive",9);set("fxBits",8);set("fxRate",4);set("fxMix",65);}
+        set("mod1Source",2);set("mod1Dest",1);set("mod1Amount",35);
+        set("mod2Source",5);set("mod2Dest",2);set("mod2Amount",45);
+        set("mod3Source",7);set("mod3Dest",4);set("mod3Amount",-30);
+        set("lfo1Shape",1);set("lfo1Rate",3.2f);set("lfo1Retrigger",1);
+        set("lfo2Shape",5);set("lfo2Rate",.7f);
+        set("macro1",.6f);set("macro2",.3f);set("macro3",.8f);
         processor->setSequenceText(0,"15,12,9[7,5]|3,1,0");
         processor->setSequenceText(1,"0,4,7[12,7,4]|0");
         processor->setSequenceText(2,"0,1[2,1]|0");
@@ -39,6 +49,10 @@ int main(int argc,char** argv) {
     auto editor=std::unique_ptr<juce::AudioProcessorEditor>(processor->createEditor());
     if(argc>2&&juce::String(argv[2])=="--layer-b")for(auto* child:editor->getChildren())
         if(child->getName()=="Edit layer B")if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();
+    auto clickPage=[&](const juce::String& name){for(auto* child:editor->getChildren())if(child->getName()==name)if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();};
+    if(modPage||lfoPage||macroPage)clickPage("Modulation page");
+    if(lfoPage)clickPage("LFO page");
+    if(macroPage)clickPage("Macros page");
     editor->setVisible(true);
     auto image=editor->createComponentSnapshot(editor->getLocalBounds(),true,1.5f);
     juce::File output(argc>1?argv[1]:"/tmp/rebit-preview.png");

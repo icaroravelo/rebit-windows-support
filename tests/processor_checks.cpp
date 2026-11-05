@@ -217,6 +217,47 @@ int main() {
             set("sequenceClock",3);juce::MemoryBlock state;synced.getStateInformation(state);set("sequenceClock",0);synced.setStateInformation(state.getData(),(int)state.getSize());
             require(std::abs(synced.state.getRawParameterValue("sequenceClock")->load()-3.f)<.01f,"Sequence clock state did not round-trip");
         }
+        {
+            RebitProcessor mod;
+            auto set=[&](const char* id,float value){auto* p=mod.state.getParameter(id);require(p!=nullptr,"Missing modulation parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};
+            set("mod1Source",3);set("mod1Dest",3);set("mod1Amount",100);
+            mod.prepareToPlay(8000,256);juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer events;
+            events.addEvent(juce::MidiMessage::noteOn(2,60,(juce::uint8)64),0);mod.processBlock(audio,events);
+            const auto quiet=audio.getMagnitude(0,256);
+            events.addEvent(juce::MidiMessage::channelPressureChange(2,127),0);mod.processBlock(audio,events);
+            const auto pressed=audio.getMagnitude(0,256);
+            require(pressed>quiet*1.25f,"Channel pressure did not reach the modulation route");
+            events.addEvent(juce::MidiMessage::aftertouchChange(2,60,0),0);mod.processBlock(audio,events);
+            juce::MemoryBlock saved;set("mod1Source",0);set("mod1Dest",0);set("mod1Amount",0);
+            set("lfo1Shape",5);set("lfo1Rate",4.5f);set("lfo1Retrigger",1);set("macro3",.75f);set("mpeEnabled",1);set("mpeBendRange",48);
+            mod.getStateInformation(saved);set("lfo1Shape",0);set("lfo1Rate",1);set("lfo1Retrigger",0);set("macro3",0);set("mpeEnabled",0);
+            mod.setStateInformation(saved.getData(),(int)saved.getSize());
+            require(mod.state.getRawParameterValue("mod1Source")->load()==0.f,"Route source state did not round-trip");
+            require(mod.state.getRawParameterValue("lfo1Shape")->load()==5.f&&std::abs(mod.state.getRawParameterValue("lfo1Rate")->load()-4.5f)<.001f,"LFO state did not round-trip");
+            require(mod.state.getRawParameterValue("lfo1Retrigger")->load()>.5f&&std::abs(mod.state.getRawParameterValue("macro3")->load()-.75f)<.001f,"Macro/retrigger state did not round-trip");
+            require(mod.state.getRawParameterValue("mpeEnabled")->load()>.5f&&mod.state.getRawParameterValue("mpeBendRange")->load()==48.f,"MPE state did not round-trip");
+            set("mod1Source",1);set("macro1",1);
+            auto tree=mod.state.copyState();
+            for(int i=tree.getNumChildren();--i>=0;){const auto id=tree.getChild(i).getProperty("id").toString();
+                if(id.startsWith("mod")||id.startsWith("lfo")||id.startsWith("macro")||id.startsWith("mpe"))tree.removeChild(i,nullptr);}
+            juce::XmlElement legacy("RebitRust");legacy.setAttribute("version",3);legacy.addChildElement(tree.createXml().release());
+            juce::MemoryBlock old;juce::AudioProcessor::copyXmlToBinary(legacy,old);mod.setStateInformation(old.getData(),(int)old.getSize());
+            require(mod.state.getRawParameterValue("mod1Source")->load()==0.f&&mod.state.getRawParameterValue("macro1")->load()==0.f&&mod.state.getRawParameterValue("mpeEnabled")->load()<.5f,"Legacy patch inherited modulation settings");
+            auto editor=std::unique_ptr<juce::AudioProcessorEditor>(mod.createEditor());
+            auto* page=control<juce::TextButton>(*editor,"Modulation page");require(page!=nullptr,"MOD tab missing");page->onClick();
+            auto* source=control<juce::ComboBox>(*editor,"Mod 1 source");auto* amount=control<juce::Slider>(*editor,"Mod 1 amount");
+            require(source&&source->isVisible()&&amount&&amount->isVisible(),"Modulation route controls missing");
+            source->setSelectedItemIndex(2,juce::sendNotificationSync);
+            require(mod.state.getRawParameterValue("mod1Source")->load()==2.f,"Route source edit did not reach the processor");
+            auto* lfoPage=control<juce::TextButton>(*editor,"LFO page");require(lfoPage!=nullptr,"LFO page tab missing");lfoPage->onClick();
+            auto* shape=control<juce::ComboBox>(*editor,"LFO 1 SHAPE");require(shape&&shape->isVisible(),"LFO controls missing");
+            shape->setSelectedItemIndex(2,juce::sendNotificationSync);
+            require(mod.state.getRawParameterValue("lfo1Shape")->load()==2.f,"LFO shape edit did not reach the processor");
+            auto* macroPage=control<juce::TextButton>(*editor,"Macros page");require(macroPage!=nullptr,"Macro page tab missing");macroPage->onClick();
+            auto* mpe=control<juce::ToggleButton>(*editor,"MPE enabled");require(mpe&&mpe->isVisible(),"MPE control missing");
+            mpe->setToggleState(true,juce::sendNotificationSync);
+            require(mod.state.getRawParameterValue("mpeEnabled")->load()>.5f,"MPE switch did not reach the processor");
+        }
         RebitProcessor p;
         p.prepareToPlay(48000,128);
         juce::AudioBuffer<float> buffer(2,128);

@@ -4,10 +4,12 @@ pub mod engine;
 mod ffi;
 pub mod layers;
 mod meter;
+pub mod modulation;
 pub mod oscillator;
 pub mod sequence;
 mod smoothing;
 pub use engine::{Engine, Parameters, PlaybackInfo};
+pub use modulation::{LfoParameters, ModRoute, ModulationParameters};
 pub use sequence::{Sequence, SequenceBank};
 
 pub mod arpeggiator;

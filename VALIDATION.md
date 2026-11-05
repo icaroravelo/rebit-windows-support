@@ -495,3 +495,36 @@ Rebuilt and signed AU/VST3/standalone. The staged installer preserved the prior
 Rust AU; installed signature verification succeeds and its executable SHA-256
 matches the built AU. Apple `auval -v aumu RbR1 Rbit` reports **AU VALIDATION
 SUCCEEDED**. Restart Logic to load this build. Modulation/expression is next.
+
+## Milestone 8: modulation and expression, 2026-11-05
+
+Added four modulation routes, two LFOs (sine, triangle, square, ramp up, ramp
+down, sample and hold), four macros, per-note velocity/aftertouch/timbre
+sources, and pitch, pulse-width, level, layer-balance, FX-drive and FX-mix
+destinations. Per-note routes run per voice; layer balance and effect offsets
+are stepped once per sample in the layer mixer. MPE uses per-channel bend,
+channel pressure, poly aftertouch and CC74, with a separate bend range.
+
+- **105 Rust tests pass** (78 unit tests and 27 integration tests). New checks
+  cover LFO bounds and sample-and-hold, source/destination scaling, aftertouch
+  and mod-wheel routing, layer-balance and FX-drive destinations, deterministic
+  LFO output, per-channel bend isolation, chunk invariance, allocation-free
+  rendering, C ABI layout and null handling.
+- `cargo clippy --offline --locked --all-targets -- -D warnings`: passed.
+- All four CTest groups passed: Rust core, AU host, native processor, VST3 host.
+- Native checks exercised channel pressure through a real modulation route,
+  version-4 state recall, legacy version-3 defaults, and real-editor MOD, LFO,
+  MACROS, route and MPE controls.
+- Release AU, VST3 and standalone builds succeeded. The installed AU signature
+  verifies and `auval -v aumu RbR1 Rbit` reports **AU VALIDATION SUCCEEDED**.
+- Actual-editor previews were rendered and inspected at 1.5x:
+  `preview-mod.png`, `preview-lfo.png`, `preview-macros.png`; default, showcase,
+  layer-B, colour and clipping previews were refreshed.
+- `dist/rebit-rust-mod-demo.wav` was rendered from the actual two-layer mixer:
+  base sound, aftertouch swell, macro A/B crossfade, then combined LFO motion.
+
+Limits: modulation LFOs are free-running rather than host-tempo-synced. Shared
+layer-balance and effect destinations use layer A's LFO clock; per-note routes
+use each voice's own LFO copy. Macros are not MIDI-learnable in this milestone.
+MPE is tested at the raw MIDI/channel level; no hardware MPE controller or
+listening test was performed. The original C++ Rebit remains unchanged.

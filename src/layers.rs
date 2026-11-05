@@ -196,20 +196,36 @@ impl LayerMixer {
                 b[..n].fill(0.);
             }
             for i in 0..n {
+                let globals = first.global_modulation_step();
+                let balance = globals.balance as f32;
                 let mut channels = [0_f32; 2];
                 for (layer, sample) in [a[i], b[i]].into_iter().enumerate() {
                     let s = &mut self.mix[layer];
                     let gain = (s.gain.next() * s.gate.next()) as f32;
                     let pan = s.pan.next() as f32;
+                    // Layer balance is a crossfade: positive favours B, negative A.
+                    let balance_gain = if layer == 0 {
+                        if balance > 0. {
+                            1. - balance
+                        } else {
+                            1.
+                        }
+                    } else if balance < 0. {
+                        1. + balance
+                    } else {
+                        1.
+                    };
                     // Centre is unity in both channels for legacy patch parity.
-                    channels[0] += sample * gain * (1. - pan.max(0.));
-                    channels[1] += sample * gain * (1. + pan.min(0.));
+                    channels[0] += sample * gain * balance_gain * (1. - pan.max(0.));
+                    channels[1] += sample * gain * balance_gain * (1. + pan.min(0.));
                 }
                 if mono {
                     let sample = (channels[0] + channels[1]) * 0.5;
                     channels = [sample, sample];
                 }
-                channels = self.effects.process(channels);
+                channels = self
+                    .effects
+                    .process_with(channels, globals.drive_db, globals.mix);
                 l[i] = channels[0];
                 r[i] = channels[1];
                 self.meter.observe(l[i].abs().max(r[i].abs()));

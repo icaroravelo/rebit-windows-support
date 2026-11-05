@@ -1,6 +1,9 @@
 //! Fixed-capacity synthesis. Rendering and MIDI handling allocate no memory.
 use crate::arpeggiator::{ArpParameters, Arpeggiator};
 use crate::meter::Meter;
+use crate::modulation::{
+    evaluate, GlobalModulation, LfoState, Modulation, ModulationParameters, SourceValues,
+};
 use crate::sequence::{Cursor, SequenceBank};
 use crate::smoothing::{Blend, Ramp};
 use crate::transport::{ClockParameters, TransportInfo};
@@ -140,6 +143,7 @@ struct Voice {
     cursors: [Cursor; 3],
     arpeggiated: bool,
     sequence_tick: Option<i64>,
+    lfo: [LfoState; 2],
 }
 impl Default for Voice {
     fn default() -> Self {
@@ -173,6 +177,7 @@ impl Default for Voice {
             cursors: [Cursor::default(); 3],
             arpeggiated: false,
             sequence_tick: None,
+            lfo: [LfoState::default(); 2],
         }
     }
 }
@@ -259,6 +264,10 @@ pub struct Engine {
     clock: ClockParameters,
     transport: TransportInfo,
     transport_frames: u64,
+    modulation: Modulation,
+    pressure: [f64; 16],
+    poly_pressure: [[f64; 128]; 16],
+    timbre: [f64; 16],
     pub(crate) sequences: Box<SequenceBank>,
 }
 impl Default for Engine {
@@ -296,6 +305,10 @@ impl Engine {
             clock: ClockParameters::default(),
             transport: TransportInfo::default(),
             transport_frames: 0,
+            modulation: Modulation::new(seed),
+            pressure: [0.; 16],
+            poly_pressure: [[0.; 128]; 16],
+            timbre: [0.; 16],
             sequences: Box::default(),
         };
         engine.prepare(sample_rate);
@@ -326,6 +339,10 @@ impl Engine {
         self.arp_voice = None;
         self.transport = TransportInfo::default();
         self.transport_frames = 0;
+        self.modulation.reset(self.seed);
+        self.pressure.fill(0.);
+        self.poly_pressure.fill([0.; 128]);
+        self.timbre.fill(0.);
     }
     fn transition_samples(&self) -> u32 {
         (self.sample_rate * 0.005).round() as u32
@@ -406,6 +423,50 @@ impl Engine {
         if p.max_poly != old.max_poly || (p.max_poly == 1 && p.behavior != old.behavior) {
             self.reconcile_voices(old.max_poly);
         }
+    }
+    pub fn set_modulation(&mut self, parameters: ModulationParameters) {
+        let next = parameters.sanitized();
+        if next == self.modulation.parameters {
+            return;
+        }
+        self.modulation.parameters = next;
+    }
+    pub fn modulation_parameters(&self) -> ModulationParameters {
+        self.modulation.parameters
+    }
+    /// Mixer-thread sample clock for shared balance and effect destinations.
+    /// Per-voice routes advance their own LFO copies inside render().
+    pub(crate) fn global_modulation_step(&mut self) -> GlobalModulation {
+        self.modulation.advance(self.sample_rate);
+        let representative = self
+            .voices
+            .iter()
+            .filter(|v| v.active)
+            .max_by_key(|v| v.age);
+        let (velocity, wheel, aftertouch, timbre) = representative.map_or((0., 0., 0., 0.), |v| {
+            let ch = v.channel as usize;
+            (
+                v.velocity as f64,
+                self.wheels[ch],
+                self.poly_pressure[ch][v.note as usize].max(self.pressure[ch]),
+                self.timbre[ch],
+            )
+        });
+        let values = SourceValues {
+            velocity,
+            wheel,
+            aftertouch,
+            timbre,
+            lfo: self.modulation.values(),
+            macros: self.modulation.parameters.macros.map(f64::from),
+        };
+        let out = evaluate(&self.modulation.parameters.routes, &values);
+        self.modulation.globals = GlobalModulation {
+            balance: out.balance,
+            drive_db: out.drive_db,
+            mix: out.mix,
+        };
+        self.modulation.globals
     }
     fn retire(&mut self, voice: Voice) {
         if !voice.active || voice.last_amplitude == 0. {
@@ -946,6 +1007,8 @@ impl Engine {
                 self.bends[ch] = ((data1 as i32 | ((data2 as i32) << 7)) - 8192) as f64 / 8192.;
                 self.retune(ch, true);
             }
+            0xd0 => self.pressure[ch] = data1 as f64 / 127.,
+            0xa0 => self.poly_pressure[ch][data1 as usize] = data2 as f64 / 127.,
             0xb0 => self.controller(ch, data1, data2),
             _ => (),
         }
@@ -975,6 +1038,7 @@ impl Engine {
     }
     fn note_on(&mut self, ch: usize, note: u8, velocity: u8) {
         self.age = self.age.wrapping_add(1);
+        self.poly_pressure[ch][note as usize] = 0.;
         self.keys[ch][note as usize] = Key {
             order: self.age,
             velocity,
@@ -1014,6 +1078,9 @@ impl Engine {
                     .unwrap_or(0)
             });
         let seed = self.seed ^ (slot as u32 + 1).wrapping_mul(0x9e37_79b9) ^ self.age as u32;
+        if !self.voices.iter().any(|voice| voice.active) {
+            self.modulation.retrigger();
+        }
         let mut v = Voice {
             active: true,
             held: true,
@@ -1030,6 +1097,13 @@ impl Engine {
         };
         for (algorithm, noise) in v.noise.iter_mut().enumerate() {
             noise.sample = next_noise(noise, algorithm);
+        }
+        for (index, lfo) in v.lfo.iter_mut().enumerate() {
+            if self.modulation.parameters.lfo[index].retrigger != 0 {
+                lfo.reset(seed ^ index as u32);
+            } else {
+                *lfo = self.modulation.lfo[index];
+            }
         }
         v.increment = pitch(
             &v,
@@ -1093,6 +1167,7 @@ impl Engine {
     }
     fn note_off(&mut self, ch: usize, note: u8) {
         self.keys[ch][note as usize] = Key::default();
+        self.poly_pressure[ch][note as usize] = 0.;
         if self.params.max_poly == 1 && self.params.behavior != 3 {
             let matches = self.voices[0].channel as usize == ch && self.voices[0].note == note;
             if matches || self.params.behavior == 1 || self.params.behavior == 2 {
@@ -1127,6 +1202,7 @@ impl Engine {
                 self.wheels[ch] = value as f64 / 127.;
                 self.retune(ch, true);
             }
+            74 => self.timbre[ch] = value as f64 / 127.,
             64 => {
                 self.sustain[ch] = value >= 64;
                 if value < 64 {
@@ -1158,6 +1234,9 @@ impl Engine {
             }
             120 => {
                 self.keys[ch].fill(Key::default());
+                self.pressure[ch] = 0.;
+                self.poly_pressure[ch].fill(0.);
+                self.timbre[ch] = 0.;
                 for tail in &mut self.tails {
                     if tail.channel as usize == ch {
                         tail.remaining = 0;
@@ -1171,6 +1250,7 @@ impl Engine {
             }
             123 => {
                 self.keys[ch].fill(Key::default());
+                self.poly_pressure[ch].fill(0.);
                 for v in &mut self.voices {
                     if v.active && !v.arpeggiated && v.channel as usize == ch {
                         v.held = false;
@@ -1185,6 +1265,9 @@ impl Engine {
                 self.bends[ch] = 0.;
                 self.wheels[ch] = 0.;
                 self.sustain[ch] = false;
+                self.pressure[ch] = 0.;
+                self.poly_pressure[ch].fill(0.);
+                self.timbre[ch] = 0.;
                 for v in &mut self.voices {
                     if v.active && v.channel as usize == ch {
                         v.sustained = false;
@@ -1361,14 +1444,36 @@ impl Engine {
                     manual_duty[i] * (1. - duty_sequence)
                         + f64::from(i == sequence_duty) * duty_sequence
                 });
+                for (index, lfo) in v.lfo.iter_mut().enumerate() {
+                    lfo.advance(
+                        self.sample_rate,
+                        self.modulation.parameters.lfo[index].rate_hz as f64,
+                    );
+                }
+                let channel = v.channel as usize;
+                let values = SourceValues {
+                    velocity: v.velocity as f64,
+                    wheel: self.wheels[channel],
+                    aftertouch: self.poly_pressure[channel][v.note as usize]
+                        .max(self.pressure[channel]),
+                    timbre: self.timbre[channel],
+                    lfo: [
+                        v.lfo[0].value(self.modulation.parameters.lfo[0].shape),
+                        v.lfo[1].value(self.modulation.parameters.lfo[1].shape),
+                    ],
+                    macros: self.modulation.parameters.macros.map(f64::from),
+                };
+                let modulation = evaluate(&self.modulation.parameters.routes, &values);
                 let base_amplitude = v.level * v.velocity as f64;
                 if v.smooth_amplitude {
                     v.amplitude_offset.reset(v.last_amplitude - base_amplitude);
                     v.amplitude_offset.target(0., smoothing_samples);
                     v.smooth_amplitude = false;
                 }
-                let amplitude =
-                    (base_amplitude + v.amplitude_offset.next()).clamp(0., 1.) * v.fade_in.next();
+                let amplitude = ((base_amplitude + v.amplitude_offset.next()).clamp(0., 1.)
+                    * modulation.level)
+                    .clamp(0., 2.)
+                    * v.fade_in.next();
                 if v.amplitude_offset.running() {
                     v.active = true;
                 }
@@ -1388,14 +1493,25 @@ impl Engine {
                     );
                 }
                 let correction = v.pitch_offset.next();
-                let increment = if correction == 0. {
+                let mut increment = if correction == 0. {
                     v.increment
                 } else {
                     (v.increment * (correction / 12.).exp2()).min(0.49)
                 };
+                if modulation.pitch != 0. {
+                    increment = (increment * (modulation.pitch / 12.).exp2()).min(0.49);
+                }
                 v.last_increment = increment;
-                sum += oscillator(v.phase, &v.noise, wave, duty, algorithms, increment, clean)
-                    * amplitude as f32;
+                sum += oscillator(
+                    v.phase,
+                    &v.noise,
+                    wave,
+                    duty,
+                    algorithms,
+                    increment,
+                    clean,
+                    modulation.duty,
+                ) * amplitude as f32;
                 advance_oscillator(&mut v.phase, &mut v.noise, increment, wave, algorithms);
                 let sweep_ended = p.sweep_initial != 0.
                     && v.time < p.sweep_time as f64
@@ -1451,6 +1567,7 @@ impl Engine {
                     tail.algorithms,
                     tail.increment,
                     tail.clean,
+                    0.,
                 ) * (tail.amplitude * (tail.remaining - 1) as f64 / tail.length as f64)
                     as f32;
                 advance_oscillator(
@@ -1481,6 +1598,7 @@ fn smooth_pitch(v: &mut Voice, increment: f64, samples: u32) {
     v.pitch_offset.reset(12. * (current / increment).log2());
     v.pitch_offset.target(0., samples);
 }
+#[allow(clippy::too_many_arguments)]
 fn oscillator(
     phase: f64,
     noise: &[Noise; 3],
@@ -1489,11 +1607,19 @@ fn oscillator(
     algorithms: [f64; 3],
     increment: f64,
     clean: f64,
+    duty_offset: f64,
 ) -> f32 {
     let pulse: f64 = duty
         .iter()
         .zip([0.125, 0.25, 0.5])
-        .map(|(weight, width)| weight * if phase < width { -1. } else { 1. })
+        .map(|(weight, width)| {
+            weight
+                * if phase < (width + duty_offset).clamp(0.02, 0.98) {
+                    -1.
+                } else {
+                    1.
+                }
+        })
         .sum();
     let triangle = ((1. - 4. * (phase - 0.5).abs()) * 7.5).round() as f32 / 7.5;
     let random: f64 = noise
@@ -1511,7 +1637,14 @@ fn oscillator(
         duty.iter()
             .zip([0.125, 0.25, 0.5])
             .filter(|(weight, _)| **weight != 0.)
-            .map(|(weight, width)| weight * crate::oscillator::clean_pulse(phase, increment, width))
+            .map(|(weight, width)| {
+                weight
+                    * crate::oscillator::clean_pulse(
+                        phase,
+                        increment,
+                        (width + duty_offset).clamp(0.02, 0.98),
+                    )
+            })
             .sum()
     };
     let clean_tri = if wave[1] == 0. {

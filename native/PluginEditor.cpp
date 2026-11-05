@@ -337,6 +337,61 @@ struct RebitEditor::Choice final : public juce::Component
     }
 };
 
+struct RebitEditor::RouteRow final : public juce::Component
+{
+    juce::ComboBox source, destination;
+    juce::Slider amount;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttachment,
+        destinationAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> amountAttachment;
+    int number = 0;
+    RouteRow (juce::AudioProcessorValueTreeState& state, int index) : number (index)
+    {
+        const juce::String prefix = "Mod " + juce::String (index + 1);
+        const juce::StringArray sources { "Off", "Velocity", "Mod wheel", "Aftertouch",
+                                          "Timbre CC74", "LFO 1", "LFO 2", "Macro 1",
+                                          "Macro 2", "Macro 3", "Macro 4", "LFO 1 unipolar",
+                                          "LFO 2 unipolar" };
+        const juce::StringArray destinations { "Off", "Pitch", "Pulse width", "Level",
+                                               "Layer balance", "FX drive", "FX mix" };
+        source.setName (prefix + " source"); destination.setName (prefix + " destination");
+        source.addItemList (sources, 1); destination.addItemList (destinations, 1);
+        source.setColour (accentColourId, violet); destination.setColour (accentColourId, violet);
+        source.setTooltip ("Modulation source for route " + juce::String (index + 1) + ". Velocity and aftertouch are per note; LFOs, macros and wheels are shared.");
+        destination.setTooltip ("Modulation destination for route " + juce::String (index + 1) + ". Pulse width and pitch are per note; layer balance and effects are shared.");
+        amount.setName (prefix + " amount");
+        amount.setSliderStyle (juce::Slider::LinearHorizontal);
+        amount.setTextBoxStyle (juce::Slider::TextBoxRight, false, 50, 22);
+        amount.setRange (-100., 100., 1.);
+        amount.setTextValueSuffix ("%");
+        amount.setNumDecimalPlacesToDisplay (0);
+        amount.setDoubleClickReturnValue (true, 0.);
+        amount.setColour (accentColourId, violet);
+        amount.setTooltip ("Bipolar amount for route " + juce::String (index + 1) + ". Negative inverts the source. Pitch spans +/-12 semitones, pulse width +/-50%, and level up to 2x.");
+        addAndMakeVisible (source); addAndMakeVisible (destination); addAndMakeVisible (amount);
+        sourceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+            state, "mod" + juce::String (index + 1) + "Source", source);
+        destinationAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+            state, "mod" + juce::String (index + 1) + "Dest", destination);
+        amountAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+            state, "mod" + juce::String (index + 1) + "Amount", amount);
+    }
+    void paint (juce::Graphics& g) override
+    {
+        caption (g, juce::String (number + 1), { 0, 0, 14, getHeight() }, muted, 10, true);
+    }
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        r.removeFromLeft (16);
+        source.setBounds (r.removeFromLeft (128).reduced (0, 3));
+        r.removeFromLeft (6);
+        destination.setBounds (r.removeFromLeft (140).reduced (0, 3));
+        r.removeFromLeft (6);
+        amount.setBounds (r.reduced (0, 3));
+    }
+};
+
 // The display polls only the processor's lock-free published copy. It never
 // touches Rust engine state. The waveform behind it remains a parameter preview.
 struct RebitEditor::PlaybackDisplay final : juce::Component, juce::SettableTooltipClient, private juce::Timer
@@ -454,10 +509,12 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"hostSync",hostSync));
     hostSync.setTooltip("Align musical arp and sequence clocks with host play/stop and PPQ. Seconds stays free. Without complete host timing, clocks free-run. Turn off for stopped-host audition.");
     choices[sequenceClock]->box.setTooltip("60 Hz keeps note-relative chip frames. Musical frames align to host PPQ with Host sync on; while stopped or without host timing they advance at the selected tempo rate.");
-    for(auto* button:{&arpTab,&monoTab,&arpStop}){
+    for(auto* button:{&arpTab,&monoTab,&modTab,&arpStop}){
         button->getProperties().set("sequenceSmall",true);button->setColour(accentColourId,cyan);addAndMakeVisible(*button);
     }
-    arpTab.onClick=[this]{arpPanel=true;updatePerformance();};monoTab.onClick=[this]{arpPanel=false;updatePerformance();};
+    modTab.setColour(accentColourId,violet);modTab.setName("Modulation page");
+    arpTab.onClick=[this]{performancePage=0;updatePerformance();};monoTab.onClick=[this]{performancePage=1;updatePerformance();};
+    modTab.onClick=[this]{performancePage=2;updatePerformance();};
     arpStop.onClick=[this]{instrument.stopArpeggiator();};
     arpStop.setTooltip("Stop all voices and clear held/latched notes. Play a new chord to restart.");
     arpEnabled.setColour(accentColourId,cyan);arpLatch.setColour(accentColourId,cyan);
@@ -473,6 +530,36 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     choices[oscillator]->box.setTooltip("Waveform changes crossfade over 5 ms while held notes keep their phase and sequence position.");
     choices[pulseDuty]->box.setTooltip("Manual pulse-width edits crossfade over 5 ms. Duty sequence frames retain their chip-style steps.");
     choices[noiseAlgorithm]->box.setTooltip("Noise types crossfade over 5 ms during playback.");
+    for(int i=0;i<4;++i){routeRows[(size_t)i]=std::make_unique<RouteRow>(instrument.state,i);addAndMakeVisible(*routeRows[(size_t)i]);}
+    const juce::StringArray lfoShapes{"Sine","Triangle","Square","Ramp up","Ramp down","Sample & hold"};
+    const char* shapeIds[]={"lfo1Shape","lfo2Shape"};const char* rateIds[]={"lfo1Rate","lfo2Rate"};const char* retriggerIds[]={"lfo1Retrigger","lfo2Retrigger"};
+    for(int i=0;i<2;++i){
+        lfoShape[(size_t)i]=std::make_unique<Choice>(instrument.state,shapeIds[i],i==0?"LFO 1 SHAPE":"LFO 2 SHAPE",lfoShapes,violet);
+        lfoShape[(size_t)i]->box.setTooltip("Shared modulation LFO. Sample & hold changes once per cycle. Per-note routes use each voice's own copy.");
+        addAndMakeVisible(*lfoShape[(size_t)i]);
+        lfoRate[(size_t)i]=std::make_unique<Knob>(instrument.state,rateIds[i],i==0?"LFO 1 RATE":"LFO 2 RATE"," Hz",violet);
+        lfoRate[(size_t)i]->slider.setTooltip("Free-running rate from 0.01 to 20 Hz. Host tempo sync is not applied to modulation LFOs.");
+        addAndMakeVisible(*lfoRate[(size_t)i]);
+        lfoRetrigger[(size_t)i].setButtonText(i==0?"Retrigger 1":"Retrigger 2");lfoRetrigger[(size_t)i].setName(i==0?"LFO 1 retrigger":"LFO 2 retrigger");
+        lfoRetrigger[(size_t)i].setColour(accentColourId,violet);
+        lfoRetrigger[(size_t)i].setTooltip("Restart this LFO at phase zero on the first note of a chord. Off keeps it free-running.");
+        addAndMakeVisible(lfoRetrigger[(size_t)i]);
+        toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,retriggerIds[i],lfoRetrigger[(size_t)i]));
+    }
+    const char* macroIds[]={"macro1","macro2","macro3","macro4"};
+    for(int i=0;i<4;++i){
+        macroKnobs[(size_t)i]=std::make_unique<Knob>(instrument.state,macroIds[i],"MACRO "+juce::String(i+1),"",violet);
+        macroKnobs[(size_t)i]->slider.setTooltip("Performance macro, 0 to 100%. Assign it as a source in any route. Values are saved with the patch.");
+        addAndMakeVisible(*macroKnobs[(size_t)i]);
+    }
+    mpeOn.setColour(accentColourId,violet);mpeOn.setName("MPE enabled");mpeOn.setTooltip("MPE lower-zone mode. Per-channel pitch bend, channel pressure and poly aftertouch work per note; bend range follows MPE BEND. MIDI is forwarded raw, so no extra bridge is required.");
+    mpeBend=std::make_unique<Knob>(instrument.state,"mpeBendRange","MPE BEND"," st",violet);
+    mpeBend->slider.setTooltip("Pitch-bend range used when MPE is enabled. Typical controllers use 48 semitones.");
+    addAndMakeVisible(mpeOn);addAndMakeVisible(*mpeBend);
+    toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"mpeEnabled",mpeOn));
+    for(auto* button:{&vibTab,&lfoTab,&macroTab}){button->getProperties().set("sequenceSmall",true);button->setColour(accentColourId,violet);addAndMakeVisible(*button);}
+    vibTab.setName("Vibrato page");lfoTab.setName("LFO page");macroTab.setName("Macros page");
+    vibTab.onClick=[this]{modulationPage=0;updateModulationPanel();};lfoTab.onClick=[this]{modulationPage=1;updateModulationPanel();};macroTab.onClick=[this]{modulationPage=2;updateModulationPanel();};
     ignoreWheel.setColour (accentColourId, violet); addAndMakeVisible (ignoreWheel);
     ignoreWheel.setTooltip ("When enabled, vibrato depth does not depend on MIDI CC1.");
     toggles.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (instrument.state, "vibratoIgnoresWheel_raw", ignoreWheel));
@@ -519,7 +606,7 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     keyboard->setColour (juce::MidiKeyboardComponent::shadowColourId, juce::Colours::transparentBlack);
     addAndMakeVisible (*keyboard);
     if(choices[monoBehavior]->box.getSelectedItemIndex()==1||choices[monoBehavior]->box.getSelectedItemIndex()==2)
-        arpPanel=arpEnabled.getToggleState();
+        performancePage=arpEnabled.getToggleState()?0:1;
     playbackDisplay=std::make_unique<PlaybackDisplay>(instrument);addAndMakeVisible(*playbackDisplay);
     for(auto* button:{&editA,&editB}){button->getProperties().set("sequenceSmall",true);addAndMakeVisible(*button);}
     editA.setName("Edit layer A");editB.setName("Edit layer B");
@@ -550,7 +637,7 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     effectKnobs[1]->slider.setTooltip("Output quantization, 4 to 24 bits. 24 bypasses quantization. Values above full scale are not clipped by this stage.");
     effectKnobs[2]->slider.setTooltip("Stereo-linked sample-and-hold. 1x is neutral; 4x holds each captured sample for four host samples. Effective rate is host sample rate / divider.");
     effectKnobs[3]->slider.setTooltip("Blend dry and processed output. FX off always returns the dry signal after its short transition.");
-    setSize (1320, 930); updatePerformance();startTimerHz (15); timerCallback();
+    setSize (1320, 930); updatePerformance();updateModulationPanel();startTimerHz (15); timerCallback();
 }
 
 RebitEditor::~RebitEditor()
@@ -620,12 +707,32 @@ void RebitEditor::applyAllSequences()
 
 void RebitEditor::updatePerformance()
 {
-    arpTab.setToggleState(arpPanel,juce::dontSendNotification);monoTab.setToggleState(!arpPanel,juce::dontSendNotification);
-    for(auto index:{monoBehavior,arpInterval})choices[(size_t)index]->setVisible(!arpPanel);
-    for(auto index:{portamento,bend,arpSpeed})knobs[(size_t)index]->setVisible(!arpPanel);
-    for(auto index:{arpPattern,arpRate,arpOctaves,arpArticulation})choices[(size_t)index]->setVisible(arpPanel);
-    for(auto index:{arpGate,arpSwing,arpSeconds})knobs[(size_t)index]->setVisible(arpPanel);
-    arpLatch.setVisible(arpPanel);arpStop.setVisible(arpPanel);hostSync.setVisible(arpPanel);repaint(24,346,478,184);
+    arpTab.setToggleState(performancePage==0,juce::dontSendNotification);
+    monoTab.setToggleState(performancePage==1,juce::dontSendNotification);
+    modTab.setToggleState(performancePage==2,juce::dontSendNotification);
+    const bool arp=performancePage==0,mono=performancePage==1,mod=performancePage==2;
+    for(auto index:{monoBehavior,arpInterval})choices[(size_t)index]->setVisible(mono);
+    for(auto index:{portamento,bend,arpSpeed})knobs[(size_t)index]->setVisible(mono);
+    for(auto index:{arpPattern,arpRate,arpOctaves,arpArticulation})choices[(size_t)index]->setVisible(arp);
+    for(auto index:{arpGate,arpSwing,arpSeconds})knobs[(size_t)index]->setVisible(arp);
+    arpLatch.setVisible(arp);arpStop.setVisible(arp);hostSync.setVisible(arp);arpEnabled.setVisible(arp);
+    for(auto& row:routeRows)if(row)row->setVisible(mod);
+    repaint(24,346,478,184);
+}
+void RebitEditor::updateModulationPanel()
+{
+    vibTab.setToggleState(modulationPage==0,juce::dontSendNotification);
+    lfoTab.setToggleState(modulationPage==1,juce::dontSendNotification);
+    macroTab.setToggleState(modulationPage==2,juce::dontSendNotification);
+    const bool vibrato=modulationPage==0,lfo=modulationPage==1,macros=modulationPage==2;
+    for(auto index:{vibratoRate,vibratoDepth,vibratoDelay,sweepPitch,sweepTime})knobs[(size_t)index]->setVisible(vibrato);
+    ignoreWheel.setVisible(vibrato);
+    for(auto& shape:lfoShape)if(shape)shape->setVisible(lfo);
+    for(auto& rate:lfoRate)if(rate)rate->setVisible(lfo);
+    for(auto& retrigger:lfoRetrigger)retrigger.setVisible(lfo);
+    for(auto& macro:macroKnobs)if(macro)macro->setVisible(macros);
+    mpeOn.setVisible(macros);if(mpeBend)mpeBend->setVisible(macros);
+    repaint(518,346,578,184);
 }
 
 void RebitEditor::timerCallback()
@@ -646,6 +753,7 @@ void RebitEditor::timerCallback()
     knobs[portamento]->setEnabled (monoMode && choices[monoBehavior]->box.getSelectedItemIndex() == 0);
     knobs[arpSpeed]->setEnabled (monoMode && choices[arpInterval]->box.getSelectedItemIndex() == 8);
     knobs[arpSeconds]->setEnabled(choices[arpRate]->box.getSelectedItemIndex()==15);
+    knobs[bend]->setEnabled(!mpeOn.getToggleState());
     for(auto& knob:effectKnobs)if(knob)knob->setEnabled(effectsOn.getToggleState());
     repaint(1120,532,176,272);
     midiActive = false;
@@ -780,7 +888,17 @@ void RebitEditor::resized()
     knobs[arpSpeed]->setBounds (353, 439, 112, 83);
     for (int i = 0; i < 5; ++i) knobs[(size_t) vibratoRate + (size_t) i]->setBounds (532 + i * 111, 387, 108, 109);
     ignoreWheel.setBounds (540, 502, 340, 22);
-    arpTab.setBounds(252,355,52,24);monoTab.setBounds(310,355,58,24);arpEnabled.setBounds(390,355,98,24);
+    vibTab.setBounds(850,355,60,24);lfoTab.setBounds(916,355,54,24);macroTab.setBounds(976,355,92,24);
+    for(int i=0;i<2;++i)if(lfoShape[(size_t)i]&&lfoRate[(size_t)i]){
+        const int x=532+i*268;
+        lfoShape[(size_t)i]->setBounds(x,387,150,45);
+        lfoRate[(size_t)i]->setBounds(x+158,387,100,109);
+        lfoRetrigger[(size_t)i].setBounds(x,470,150,22);
+    }
+    for(int i=0;i<4;++i)if(macroKnobs[(size_t)i])macroKnobs[(size_t)i]->setBounds(532+i*100,390,100,100);
+    mpeOn.setBounds(945,395,140,22);if(mpeBend)mpeBend->setBounds(960,420,100,90);
+    arpTab.setBounds(190,355,52,24);monoTab.setBounds(248,355,58,24);modTab.setBounds(312,355,56,24);arpEnabled.setBounds(390,355,98,24);
+    for(size_t i=0;i<routeRows.size();++i)if(routeRows[i])routeRows[i]->setBounds(40,385+(int)i*34,446,32);
     choices[arpPattern]->setBounds(40,385,130,45);choices[arpRate]->setBounds(180,385,116,45);
     choices[arpOctaves]->setBounds(306,385,62,45);choices[arpArticulation]->setBounds(378,385,108,45);
     knobs[arpGate]->setBounds(44,439,100,83);knobs[arpSwing]->setBounds(154,439,100,83);knobs[arpSeconds]->setBounds(264,439,100,83);

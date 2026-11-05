@@ -21,6 +21,12 @@ struct RustArpParameters {
     float seconds, gate, swing;
 };
 static_assert(sizeof(RustArpParameters)==36 && std::is_standard_layout_v<RustArpParameters>);
+struct RustModRoute { int32_t source,destination; float amount; };
+static_assert(sizeof(RustModRoute)==12 && std::is_standard_layout_v<RustModRoute>);
+struct RustLfoParameters { int32_t shape; float rate_hz; int32_t retrigger; };
+static_assert(sizeof(RustLfoParameters)==12 && std::is_standard_layout_v<RustLfoParameters>);
+struct RustModulationParameters { RustModRoute routes[4]; RustLfoParameters lfo[2]; float macros[4]; };
+static_assert(sizeof(RustModulationParameters)==88 && std::is_standard_layout_v<RustModulationParameters>);
 struct RustClockParameters { int32_t host_sync, sequence_rate; };
 struct RustTransportInfo {
     double ppq,bpm,loop_start,loop_end;
@@ -53,6 +59,7 @@ void rebit_engine_free(RustEngine*);
 void rebit_engine_prepare(RustEngine*, double);
 void rebit_engine_reset(RustEngine*);
 void rebit_engine_arp_parameters(RustEngine*, const RustArpParameters*);
+void rebit_engine_modulation(RustEngine*, const RustModulationParameters*);
 void rebit_engine_clock_parameters(RustEngine*,const RustClockParameters*);
 void rebit_engine_transport(RustEngine*,const RustTransportInfo*);
 int32_t rebit_engine_clock_status(const RustEngine*);

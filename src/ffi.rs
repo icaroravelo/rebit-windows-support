@@ -296,6 +296,16 @@ pub unsafe extern "C" fn rebit_engine_positions(engine: *const Engine, positions
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rebit_engine_modulation(
+    engine: *mut Engine,
+    parameters: *const crate::modulation::ModulationParameters,
+) {
+    if let (Some(engine), Some(parameters)) = (engine.as_mut(), parameters.as_ref()) {
+        engine.set_modulation(*parameters);
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rebit_engine_arp_parameters(
     engine: *mut Engine,
     parameters: *const crate::ArpParameters,
@@ -397,6 +407,40 @@ mod tests {
             assert_eq!(left, [-0.25; 8]);
             rebit_mixer_free(ptr::null_mut());
             rebit_engine_tuning(ptr::null_mut(), 0.);
+        }
+    }
+    #[test]
+    fn modulation_abi_and_null_handling() {
+        use crate::modulation::{LfoParameters, ModRoute, ModulationParameters};
+        assert_eq!(std::mem::size_of::<ModulationParameters>(), 88);
+        assert_eq!(std::mem::align_of::<ModulationParameters>(), 4);
+        let mut engine = Engine::default();
+        let p = ModulationParameters {
+            routes: [
+                ModRoute {
+                    source: 1,
+                    destination: 1,
+                    amount: 0.5,
+                },
+                ModRoute::default(),
+                ModRoute::default(),
+                ModRoute::default(),
+            ],
+            lfo: [
+                LfoParameters {
+                    shape: 5,
+                    rate_hz: 3.,
+                    retrigger: 1,
+                },
+                LfoParameters::default(),
+            ],
+            macros: [0.25, 0., 1., 0.5],
+        };
+        unsafe {
+            rebit_engine_modulation(&mut engine, &p);
+            assert_eq!(engine.modulation_parameters(), p);
+            rebit_engine_modulation(&mut engine, ptr::null());
+            rebit_engine_modulation(ptr::null_mut(), &p);
         }
     }
     #[test]

@@ -1,5 +1,8 @@
+use rebit_rust::layers::{LayerMix, LayerMixer};
 use rebit_rust::sequence::{Cursor, MAX_FRAMES};
-use rebit_rust::{Engine, Parameters, Sequence, SequenceBank};
+use rebit_rust::{
+    Engine, LfoParameters, ModRoute, ModulationParameters, Parameters, Sequence, SequenceBank,
+};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -705,4 +708,287 @@ fn clean_and_effect_automation_are_chunk_invariant_and_allocation_free() {
     assert!(l.iter().chain(&r).all(|x| x.is_finite()));
     assert_eq!(silence, [0.; 32]);
     assert_eq!(other, [0.; 32]);
+}
+
+fn modulation(
+    routes: [ModRoute; 4],
+    lfo: [LfoParameters; 2],
+    macros: [f32; 4],
+) -> ModulationParameters {
+    ModulationParameters {
+        routes,
+        lfo,
+        macros,
+    }
+}
+fn route(source: i32, destination: i32, amount: f32) -> ModRoute {
+    ModRoute {
+        source,
+        destination,
+        amount,
+    }
+}
+#[test]
+fn velocity_aftertouch_and_wheel_reach_their_destinations() {
+    let routes = [
+        route(1, 3, 1.),
+        route(2, 2, 1.),
+        route(3, 3, 1.),
+        ModRoute::default(),
+    ];
+    let mut quiet = Engine::new(8000., 1);
+    quiet.set_modulation(modulation(routes, [LfoParameters::default(); 2], [0.; 4]));
+    quiet.midi(0x90, 60, 32);
+    let quiet_peak = peak(&audio(&mut quiet, 64));
+    let mut loud = Engine::new(8000., 1);
+    loud.set_modulation(modulation(routes, [LfoParameters::default(); 2], [0.; 4]));
+    loud.midi(0x90, 60, 32);
+    loud.midi(0xd0, 127, 0);
+    let loud_peak = peak(&audio(&mut loud, 64));
+    assert!(
+        loud_peak > quiet_peak * 1.4,
+        "aftertouch did not lift level"
+    );
+
+    let mut plain = Engine::new(8000., 1);
+    plain.midi(0x90, 60, 96);
+    let plain_out = audio(&mut plain, 64);
+    let mut wheel = Engine::new(8000., 1);
+    wheel.set_modulation(modulation(routes, [LfoParameters::default(); 2], [0.; 4]));
+    wheel.midi(0xb0, 1, 127);
+    wheel.midi(0x90, 60, 96);
+    let wheel_out = audio(&mut wheel, 64);
+    assert_ne!(plain_out, wheel_out, "mod wheel did not reach pulse width");
+}
+#[test]
+fn lfo_routes_are_deterministic_and_bounded() {
+    let routes = [
+        route(5, 1, 0.5),
+        route(6, 3, 0.25),
+        ModRoute::default(),
+        ModRoute::default(),
+    ];
+    let lfo = [
+        LfoParameters {
+            shape: 5,
+            rate_hz: 7.,
+            retrigger: 1,
+        },
+        LfoParameters {
+            shape: 1,
+            rate_hz: 3.,
+            retrigger: 0,
+        },
+    ];
+    let mut first = Engine::new(48000., 9);
+    first.set_modulation(modulation(routes, lfo, [0.; 4]));
+    first.midi(0x90, 60, 100);
+    let expected = audio(&mut first, 4096);
+    let mut second = Engine::new(48000., 9);
+    second.set_modulation(modulation(routes, lfo, [0.; 4]));
+    second.midi(0x90, 60, 100);
+    let actual = audio(&mut second, 4096);
+    assert_eq!(expected, actual, "LFO routing is not deterministic");
+    assert!(expected.iter().all(|x| x.is_finite()) && peak(&expected) > 0.);
+    let mut neutral = Engine::new(48000., 9);
+    neutral.midi(0x90, 60, 100);
+    assert_ne!(
+        expected,
+        audio(&mut neutral, 4096),
+        "LFO routes had no effect"
+    );
+}
+#[test]
+fn layer_balance_and_fx_destinations_are_shared_and_sample_exact() {
+    let mut a = Engine::new(8000., 1);
+    let mut b = Engine::new(8000., 2);
+    let mut mixer = LayerMixer::default();
+    mixer.prepare(8000.);
+    mixer.set_mix(
+        1,
+        LayerMix {
+            enabled: 1,
+            gain: 0.,
+            pan: 0.,
+        },
+    );
+    a.set_modulation(modulation(
+        [
+            route(7, 4, 1.),
+            ModRoute::default(),
+            ModRoute::default(),
+            ModRoute::default(),
+        ],
+        [LfoParameters::default(); 2],
+        [1., 0., 0., 0.],
+    ));
+    a.midi(0x90, 0, 127);
+    let mut left = [0.; 64];
+    let mut right = [0.; 64];
+    mixer.render(&mut a, &mut b, &mut left, &mut right);
+    assert_eq!(peak(&left), 0., "layer balance did not mute A");
+    assert_eq!(left, right);
+
+    let mut a = Engine::new(8000., 1);
+    let mut b = Engine::new(8000., 2);
+    let mut mixer = LayerMixer::default();
+    mixer.prepare(8000.);
+    mixer.set_effects(rebit_rust::effects::EffectsParameters {
+        enabled: 1,
+        drive_db: 0.,
+        bits: 24.,
+        rate_divider: 1.,
+        mix: 1.,
+    });
+    a.set_modulation(modulation(
+        [
+            route(7, 5, 1.),
+            ModRoute::default(),
+            ModRoute::default(),
+            ModRoute::default(),
+        ],
+        [LfoParameters::default(); 2],
+        [1., 0., 0., 0.],
+    ));
+    a.set_parameters(Parameters {
+        gain: 0.1,
+        ..Parameters::default()
+    });
+    a.midi(0x90, 60, 127);
+    mixer.render(&mut a, &mut b, &mut left, &mut right);
+    assert!(left.iter().all(|x| x.is_finite()) && peak(&left) > 0.);
+    let mut plain = Engine::new(8000., 1);
+    let mut plain_b = Engine::new(8000., 2);
+    let mut plain_mixer = LayerMixer::default();
+    plain_mixer.prepare(8000.);
+    plain_mixer.set_effects(rebit_rust::effects::EffectsParameters {
+        enabled: 1,
+        drive_db: 0.,
+        bits: 24.,
+        rate_divider: 1.,
+        mix: 1.,
+    });
+    plain.set_parameters(Parameters {
+        gain: 0.1,
+        ..Parameters::default()
+    });
+    plain.midi(0x90, 60, 127);
+    let mut plain_left = [0.; 64];
+    let mut plain_right = [0.; 64];
+    plain_mixer.render(&mut plain, &mut plain_b, &mut plain_left, &mut plain_right);
+    assert_ne!(left, plain_left, "FX drive destination had no effect");
+}
+#[test]
+fn modulation_rendering_is_chunk_invariant_and_allocation_free() {
+    let routes = [
+        route(5, 1, 0.4),
+        route(6, 3, 0.2),
+        ModRoute::default(),
+        ModRoute::default(),
+    ];
+    let lfo = [
+        LfoParameters {
+            shape: 0,
+            rate_hz: 5.,
+            retrigger: 0,
+        },
+        LfoParameters {
+            shape: 4,
+            rate_hz: 2.,
+            retrigger: 0,
+        },
+    ];
+    let mut expected_a = Engine::new(48000., 3);
+    let mut expected_b = Engine::new(48000., 4);
+    let mut expected_mixer = LayerMixer::default();
+    expected_mixer.prepare(48000.);
+    expected_a.set_modulation(modulation(routes, lfo, [0.; 4]));
+    expected_a.midi(0x90, 60, 100);
+    let mut expected_l = vec![0.; 2048];
+    let mut expected_r = vec![0.; 2048];
+    expected_mixer.render(
+        &mut expected_a,
+        &mut expected_b,
+        &mut expected_l,
+        &mut expected_r,
+    );
+
+    let mut actual_a = Engine::new(48000., 3);
+    let mut actual_b = Engine::new(48000., 4);
+    let mut actual_mixer = LayerMixer::default();
+    actual_mixer.prepare(48000.);
+    actual_a.set_modulation(modulation(routes, lfo, [0.; 4]));
+    actual_a.midi(0x90, 60, 100);
+    let mut actual_l = vec![0.; 2048];
+    let mut actual_r = vec![0.; 2048];
+    for (left, right) in actual_l.chunks_mut(137).zip(actual_r.chunks_mut(137)) {
+        for (left, right) in left.chunks_mut(7).zip(right.chunks_mut(7)) {
+            actual_mixer.render(&mut actual_a, &mut actual_b, left, right);
+        }
+    }
+    assert_eq!(expected_l, actual_l);
+    assert_eq!(expected_r, actual_r);
+    TRACK.with(|track| track.set(true));
+    let before = ALLOCS.with(Cell::get);
+    actual_mixer.render(
+        &mut actual_a,
+        &mut actual_b,
+        &mut actual_l[..128],
+        &mut actual_r[..128],
+    );
+    let after = ALLOCS.with(Cell::get);
+    TRACK.with(|track| track.set(false));
+    assert_eq!(before, after, "modulation rendering allocated");
+}
+#[test]
+fn per_channel_bend_and_pressure_support_mpe_note_expression() {
+    let mut other = Engine::new(8000., 1);
+    other.midi(0x90, 60, 127);
+    let base = audio(&mut other, 128);
+    let mut bent_elsewhere = Engine::new(8000., 1);
+    bent_elsewhere.midi(0x90, 60, 127);
+    bent_elsewhere.midi(0xe1, 0, 127);
+    assert_eq!(
+        base,
+        audio(&mut bent_elsewhere, 128),
+        "a member channel bend leaked into another note"
+    );
+    let mut bent = Engine::new(8000., 1);
+    bent.midi(0x90, 60, 127);
+    bent.midi(0xe0, 0, 127);
+    assert_ne!(
+        base,
+        audio(&mut bent, 128),
+        "per-note bend did not change pitch"
+    );
+
+    let routes = [
+        route(3, 3, 1.),
+        ModRoute::default(),
+        ModRoute::default(),
+        ModRoute::default(),
+    ];
+    let mut pressure = Engine::new(8000., 1);
+    pressure.set_modulation(modulation(routes, [LfoParameters::default(); 2], [0.; 4]));
+    pressure.midi(0x90, 60, 64);
+    pressure.midi(0xd0, 127, 0);
+    let pressed = peak(&audio(&mut pressure, 64));
+    let mut plain = Engine::new(8000., 1);
+    plain.set_modulation(modulation(routes, [LfoParameters::default(); 2], [0.; 4]));
+    plain.midi(0x90, 60, 64);
+    let released = peak(&audio(&mut plain, 64));
+    assert!(
+        pressed > released * 1.4,
+        "channel pressure did not reach its route"
+    );
+
+    let mut poly = Engine::new(8000., 1);
+    poly.set_modulation(modulation(routes, [LfoParameters::default(); 2], [0.; 4]));
+    poly.midi(0x90, 60, 64);
+    poly.midi(0xa0, 60, 127);
+    let poly_pressed = peak(&audio(&mut poly, 64));
+    assert!(
+        poly_pressed > released * 1.4,
+        "poly aftertouch did not reach its route"
+    );
 }

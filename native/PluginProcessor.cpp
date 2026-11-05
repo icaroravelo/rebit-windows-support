@@ -46,6 +46,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout RebitProcessor::layout() {
     boolean("fxEnabled","Effects enabled");number("fxDrive","Saturation drive",0,24,0,1,.1f);
     number("fxBits","Bit depth",4,24,24,1,1);number("fxRate","Rate divider",1,32,1,1,1);
     number("fxMix","Effects mix",0,100,100,1,1);
+    const juce::StringArray modSources{"Off","Velocity","Mod wheel","Aftertouch","Timbre CC74","LFO 1","LFO 2","Macro 1","Macro 2","Macro 3","Macro 4","LFO 1 unipolar","LFO 2 unipolar"};
+    const juce::StringArray modDestinations{"Off","Pitch","Pulse width","Level","Layer balance","FX drive","FX mix"};
+    for(int i=1;i<=4;++i){
+        const auto n=juce::String(i);
+        choice(("mod"+n+"Source").toRawUTF8(),("Mod "+n+" source").toRawUTF8(),modSources);
+        choice(("mod"+n+"Dest").toRawUTF8(),("Mod "+n+" destination").toRawUTF8(),modDestinations);
+        number(("mod"+n+"Amount").toRawUTF8(),("Mod "+n+" amount").toRawUTF8(),-100,100,0,1,1);
+    }
+    const juce::StringArray lfoShapes{"Sine","Triangle","Square","Ramp up","Ramp down","Sample & hold"};
+    choice("lfo1Shape","LFO 1 shape",lfoShapes);number("lfo1Rate","LFO 1 rate",.01f,20,1,.5f,.01f);boolean("lfo1Retrigger","LFO 1 retrigger");
+    choice("lfo2Shape","LFO 2 shape",lfoShapes);number("lfo2Rate","LFO 2 rate",.01f,20,1,.5f,.01f);boolean("lfo2Retrigger","LFO 2 retrigger");
+    number("macro1","Macro 1",0,1,0,1,.01f);number("macro2","Macro 2",0,1,0,1,.01f);
+    number("macro3","Macro 3",0,1,0,1,.01f);number("macro4","Macro 4",0,1,0,1,.01f);
+    boolean("mpeEnabled","MPE enabled");number("mpeBendRange","MPE bend range",0,96,48,1,1);
     return l;
 }
 RebitProcessor::RebitProcessor()
@@ -80,6 +94,22 @@ void RebitProcessor::readParameters(bool readTransport) {
     p.portamento=value("portamentoTime");p.bend_range=value("bendRange");p.vibrato_period=value("vibratoRate");p.vibrato_depth=value("vibratoDepth");p.vibrato_delay=value("vibratoDelay");p.ignores_wheel=value("vibratoIgnoresWheel_raw")>.5f;
     p.sweep_initial=value("sweepInitialPitch");p.sweep_time=value("sweepTime");p.interval=value("arpeggioIntervalSliderValue");p.interval_type=(int)value("arpeggioIntervalType_raw");
     p.volume_enabled=value("isVolumeSequenceEnabled_raw")>.5f;p.pitch_enabled=value("isPitchSequenceEnabled_raw")>.5f;p.duty_enabled=value("isDutySequenceEnabled_raw")>.5f;p.pitch_mode=(int)value("pitchSequenceMode_raw");
+    if(value("mpeEnabled")>.5f)p.bend_range=value("mpeBendRange");
+    RustModulationParameters modulation{};
+    for(int i=0;i<4;++i){
+        const auto n=juce::String(i+1);
+        auto& route=modulation.routes[i];
+        route.source=(int)value(("mod"+n+"Source").toRawUTF8());
+        route.destination=(int)value(("mod"+n+"Dest").toRawUTF8());
+        route.amount=value(("mod"+n+"Amount").toRawUTF8())*.01f;
+        modulation.macros[(size_t)i]=value(("macro"+n).toRawUTF8());
+    }
+    const char* lfoShapes[]={"lfo1Shape","lfo2Shape"};const char* lfoRates[]={"lfo1Rate","lfo2Rate"};const char* lfoRetriggers[]={"lfo1Retrigger","lfo2Retrigger"};
+    for(int i=0;i<2;++i){
+        modulation.lfo[i].shape=(int)value(lfoShapes[i]);
+        modulation.lfo[i].rate_hz=value(lfoRates[i]);
+        modulation.lfo[i].retrigger=value(lfoRetriggers[i])>.5f;
+    }
     RustTransportInfo transport{};transport.bpm=120.;bool tempoValid=false;
     if(readTransport)if(auto* ph=getPlayHead())if(auto pos=ph->getPosition()){
         if(auto tempo=pos->getBpm())if(std::isfinite(*tempo)&&*tempo>0.){transport.bpm=*tempo;tempoValid=true;}
@@ -100,6 +130,7 @@ void RebitProcessor::readParameters(bool readTransport) {
     RustClockParameters clocks{value("hostSync")>.5f?1:0,(int)value("sequenceClock")};
     for(size_t layer=0;layer<2;++layer){
         auto* engine=engines[layer];rebit_engine_arp_parameters(engine,&arp);
+        rebit_engine_modulation(engine,&modulation);
         rebit_engine_parameters(engine,layer==0?&p:&b,transport.bpm);
         rebit_engine_clock_parameters(engine,&clocks);rebit_engine_transport(engine,&transport);
     }
@@ -211,7 +242,7 @@ juce::String RebitProcessor::setSequenceText(int lane,const juce::String& text,i
     rebit_bank_free(publication);texts[index][(size_t)lane]=text;++sequenceVersion[index];return {};
 }
 void RebitProcessor::getStateInformation(juce::MemoryBlock& out) {
-    const juce::ScopedLock lock(textMutex);auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",3);
+    const juce::ScopedLock lock(textMutex);auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",4);
     xml->addChildElement(state.copyState().createXml().release());const char* names[]={"volume","pitch","duty"};
     for(size_t layer=0;layer<2;++layer){
         auto* node=layer==0?xml.get():xml->createNewChildElement("layerB");
@@ -221,7 +252,7 @@ void RebitProcessor::getStateInformation(juce::MemoryBlock& out) {
 }
 void RebitProcessor::setStateInformation(const void* data,int size) {
     auto xml=getXmlFromBinary(data,size);if(!xml||!xml->hasTagName("RebitRust"))return;
-    const int version=xml->getIntAttribute("version");if(version!=1&&version!=2&&version!=3)return;
+    const int version=xml->getIntAttribute("version");if(version<1||version>4)return;
     auto* params=xml->getChildByName("RebitRustParams");if(!params)return;
     const juce::ScopedLock textLock(textMutex);
     std::array<RustSequenceBank*,2> next{{rebit_bank_new(),rebit_bank_new()}};
@@ -268,6 +299,17 @@ void RebitProcessor::setStateInformation(const void* data,int size) {
         if(p->paramID.startsWith("fx")||p->paramID.endsWith("SoundMode")){
             auto child=parameterTree.getChildWithProperty("id",p->paramID);
             if(version<3&&child.isValid()){parameterTree.removeChild(child,nullptr);child={};}
+            if(!child.isValid()){
+                juce::ValueTree defaults("PARAM");defaults.setProperty("id",p->paramID,nullptr);
+                defaults.setProperty("value",p->convertFrom0to1(p->getDefaultValue()),nullptr);parameterTree.addChild(defaults,-1,nullptr);
+            }
+        }
+    // Version-4 adds the modulation matrix, LFOs, macros and MPE. Legacy
+    // patches must not inherit whatever happens to be loaded in the editor.
+    for(auto* parameter:getParameters())if(auto* p=dynamic_cast<juce::RangedAudioParameter*>(parameter))
+        if(p->paramID.startsWith("mod")||p->paramID.startsWith("lfo")||p->paramID.startsWith("macro")||p->paramID.startsWith("mpe")){
+            auto child=parameterTree.getChildWithProperty("id",p->paramID);
+            if(version<4&&child.isValid()){parameterTree.removeChild(child,nullptr);child={};}
             if(!child.isValid()){
                 juce::ValueTree defaults("PARAM");defaults.setProperty("id",p->paramID,nullptr);
                 defaults.setProperty("value",p->convertFrom0to1(p->getDefaultValue()),nullptr);parameterTree.addChild(defaults,-1,nullptr);

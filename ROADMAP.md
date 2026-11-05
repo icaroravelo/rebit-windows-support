@@ -32,11 +32,11 @@ parameter IDs, and version-1 patches; migrate state explicitly when needed.
    - Preserve raw chip sound; offer reduced-aliasing oscillators.
    - Optional saturation, bit-depth and sample-rate reduction, with bypass.
    - Compare CPU and spectra; avoid an unmeasured performance claim.
-8. **Modulation and expression — next**
+8. **Modulation and expression — completed and installed**
    - Velocity, wheel, aftertouch, and LFO routing; performance macros.
    - Pulse width, pitch, layer balance, and effects destinations.
    - Add MPE as a later part of this milestone, including the JUCE MIDI bridge.
-9. **Presets and musical randomization — planned**
+9. **Presets and musical randomization — next**
    - Preset browser and useful bass, lead, percussion, and game-effect patches.
    - Section-selective randomization, locks, deterministic seeds, and undo.
 
@@ -143,4 +143,29 @@ Version-3 patches save the new controls. Version-1/2 patches migrate to Raw and
 FX bypass while preserving their established layer/state migration. The AU is
 installed with a verified signature/hash and passes Apple AU validation; the
 prior Rust AU is backed up. Restart Logic, select SOUND MODE per layer, and turn
-FX on to use the master chain. Modulation and expression is next.
+FX on to use the master chain.
+
+## Milestone 8 delivery
+
+Completed 2026-11-05. Added a four-route modulation matrix with velocity,
+mod-wheel, channel/poly aftertouch, CC74 timbre, two LFOs, four macros, LFO
+unipolar sources, and pitch, pulse-width, level, layer-balance, FX-drive and
+FX-mix destinations. Per-note routes use per-voice LFO copies; shared balance
+and effects are stepped once per sample by the layer mixer, so rendering stays
+buffer-size independent. LFOs support sine, triangle, square, ramp up/down and
+sample-and-hold, with optional note retrigger and 0.01–20 Hz rates.
+
+MPE is exposed as a MACROS-page switch with a separate bend range. Raw
+per-channel pitch bend, channel pressure, poly aftertouch and CC74 are handled
+per member channel without an extra bridge. Version-4 state stores routes, LFOs,
+macros and MPE settings; version-1/2/3 patches load with all routes off, default
+LFOs, zero macros and MPE off, preserving their previous sound.
+
+105 Rust tests, Clippy with warnings denied, and all four CTest groups pass,
+including per-note pressure/bend, route scaling, layer-balance and FX-drive
+checks, chunk invariance, allocation checks, editor routing, state recall and
+legacy migration. The AU, VST3 and standalone builds pass; Apple AU validation
+succeeds after installation. Previews are `preview-mod.png`, `preview-lfo.png`
+and `preview-macros.png`; the eight-second demo is
+`dist/rebit-rust-mod-demo.wav`. Milestone 9, presets and musical randomization,
+is next.

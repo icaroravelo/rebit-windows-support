@@ -130,11 +130,21 @@ impl Effects {
         self.mix.target(p.mix as f64, samples);
     }
     pub fn process(&mut self, dry: [f32; 2]) -> [f32; 2] {
+        self.process_with(dry, 0., 0.)
+    }
+    /// Per-sample offsets from the shared modulation matrix. Zero offsets are
+    /// bit-identical to `process`.
+    pub fn process_with(
+        &mut self,
+        dry: [f32; 2],
+        drive_offset_db: f64,
+        mix_offset: f64,
+    ) -> [f32; 2] {
         if self.params.enabled == 0 && self.gate.current == 0. && !self.gate.running() {
             return dry;
         }
-        let wet = self.gate.next() * self.mix.next();
-        let db = self.drive.next();
+        let wet = self.gate.next() * (self.mix.next() + mix_offset).clamp(0., 1.);
+        let db = (self.drive.next() + drive_offset_db).clamp(0., 24.);
         let bits = self.bits.next();
         let divider = self.divider.next();
         if wet == 0. {

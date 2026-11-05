@@ -18,6 +18,7 @@ public:
 private:
     struct Knob;
     struct Choice;
+    struct RouteRow;
     struct Keyboard;
     struct PlaybackDisplay;
     class RebitLookAndFeel;
@@ -40,7 +41,8 @@ private:
     juce::TooltipWindow tooltips { this, 650 };
     bool midiActive = false;
     bool monoMode = false;
-    bool arpPanel = true;
+    int performancePage = 0; // 0 ARP, 1 MONO, 2 MOD
+    int modulationPage = 0;  // 0 VIB, 1 LFO, 2 MACROS
     int selectedLayer=0;
     bool switchingLayer=false;
     juce::TextButton editA {"EDIT A"}, editB {"EDIT B"};
@@ -51,9 +53,18 @@ private:
     std::unique_ptr<Choice> soundMode;
     std::array<std::unique_ptr<Knob>,4> effectKnobs;
     juce::ToggleButton effectsOn {"FX on"};
-    juce::TextButton arpTab { "ARP" }, monoTab { "MONO" }, arpStop { "STOP" };
+    juce::TextButton arpTab { "ARP" }, monoTab { "MONO" }, modTab { "MOD" }, arpStop { "STOP" };
+    juce::TextButton vibTab { "VIB" }, lfoTab { "LFO" }, macroTab { "MACROS" };
+    std::array<std::unique_ptr<RouteRow>,4> routeRows;
+    std::array<std::unique_ptr<Choice>,2> lfoShape;
+    std::array<std::unique_ptr<Knob>,2> lfoRate;
+    std::array<juce::ToggleButton,2> lfoRetrigger;
+    std::array<std::unique_ptr<Knob>,4> macroKnobs;
+    juce::ToggleButton mpeOn { "MPE" };
+    std::unique_ptr<Knob> mpeBend;
     juce::ToggleButton arpEnabled { "Arp on" }, arpLatch { "Latch" }, hostSync { "Host sync" };
     void updatePerformance();
+    void updateModulationPanel();
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> toggles;
     void timerCallback() override;
     void applySequence (int);

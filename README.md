@@ -22,14 +22,17 @@ meter and voice tiles show actual processed playback.
 
 Knob values remain editable, and double-click resets a knob to its default.
 The independent arpeggiator works at every voice count. The MONO tab holds the
-legacy one-voice modes; glide is available there with Arp off. Colours
-separate oscillator, amplitude, performance, modulation, and sequence controls.
+legacy one-voice modes; glide is available there with Arp off. The MOD tab
+holds four modulation routes, while VIB, LFO and MACROS select the shared
+sources. Colours separate oscillator, amplitude, performance, modulation, and
+sequence controls.
 
 See `preview.png` for the default patch, `preview-showcase.png` for a populated
 patch, `preview-layer-b.png` for B's controls, `preview-colour.png` for Clean/FX,
-and `preview-clipping.png` for
-output above full scale with a releasing voice. All are rendered from the actual editor and audio processor; preview
-patches do not change defaults.
+`preview-mod.png` for the route matrix, `preview-lfo.png` for LFO sources,
+`preview-macros.png` for macros and MPE, and `preview-clipping.png` for output
+above full scale with a releasing voice. All are rendered from the actual
+editor and audio processor; preview patches do not change defaults.
 
 ### Two sound layers
 
@@ -62,11 +65,13 @@ The editor is now 1320x930, with the layer controls in a side panel. Invalid
 sequence drafts must be corrected before switching layers. Each layer's bank
 and playhead stay separate; editing B does not change A's sequence text.
 
-New patches use state **version 3**. Version-1 Rust patches load into A with
+New patches use state **version 4**. Version-1 Rust patches load into A with
 unity layer level, center pan and zero added tuning; B is explicitly disabled
-and cleared. Version-2 patches retain both layers. Both old formats load in Raw
-with effects off. Existing parameter IDs and plugin identity are retained. New
-states need this build or later; earlier builds reject version 3.
+and cleared. Version-2 patches retain both layers. Old formats load in Raw with
+effects off and with every modulation route disabled, both LFOs at their
+defaults, macros at zero and MPE off. Existing parameter IDs and plugin identity
+are retained. New states need this build or later; earlier builds reject
+version 4.
 
 An offline stereo example is `dist/rebit-rust-layers-demo.wav`. Reproduce it with:
 
@@ -146,6 +151,64 @@ at least 250 ms (or three buffer durations for long buffers) and show **AUDIO
 IDLE**; the clip latch remains available. Engine ballistics advance in audio
 samples and remain independent of processing-buffer size.
 
+### Modulation and expression
+
+**PERFORMANCE → MOD** contains four independent routes. Each route chooses a
+source, a destination, and a bipolar **AMOUNT** from -100% to +100%. Negative
+amounts invert the source. **MODULATION → VIB / LFO / MACROS** selects the
+shared sources and legacy vibrato controls.
+
+Sources:
+
+- **Velocity, aftertouch and timbre CC74** are per note. Aftertouch combines
+  channel pressure and polyphonic aftertouch, so MPE timbre and pressure work
+  per member channel.
+- **Mod wheel** is the channel's CC1 value.
+- **LFO 1 / LFO 2** run at 0.01–20 Hz with sine, triangle, square, ramp up, ramp
+  down, or sample-and-hold shapes. **Retrigger** restarts a LFO at phase zero on
+  the first note of a chord. Per-note routes use a copy of the LFO, so each voice
+  keeps its own phase; shared balance and effect routes use one clock.
+- **Macro 1–4** are 0–100% performance controls, saved with the patch.
+- **LFO unipolar** versions map -1..+1 to 0..1, useful for one-sided movement.
+
+Destinations:
+
+- **Pitch** spans ±12 semitones at 100% amount.
+- **Pulse width** shifts the pulse threshold by ±50%; triangle and noise are
+  unaffected.
+- **Level** multiplies amplitude from 0 to 2x at 100%.
+- **Layer balance** crossfades A and B: positive favours B, negative A. It only
+  attenuates, and it is evaluated on layer A's shared source clock. Shared
+  destinations use the newest active voice for velocity and aftertouch.
+- **FX drive** adds ±12 dB before the colour chain; **FX mix** shifts the dry/wet
+  blend. These are shared destinations and require the effects to be on.
+
+Velocity still scales every voice directly and the mod wheel still drives
+delayed vibrato when **Independent of mod wheel** is off. Routes are additive
+where it makes sense; route off is exactly neutral and preserves the previous
+sound. The matrix is sanitized on the audio thread: non-finite or out-of-range
+settings fall back to neutral and rendering remains allocation-free.
+
+**MPE** is available on the MACROS page. Per-channel pitch bend, channel
+pressure, poly aftertouch and CC74 timbre are forwarded as raw MIDI; no extra
+bridge is required. MPE mode uses **MPE BEND** (default 48 semitones) instead of
+the normal bend range. Note identity remains channel-plus-note, so each member
+channel bends independently while the lower-zone master channel still controls
+chord-wide messages. Channels are not limited to the lower zone; the engine
+accepts per-note expression on any of the 16 MIDI channels.
+
+`dist/rebit-rust-mod-demo.wav` demonstrates the base sound, an aftertouch swell,
+a macro A/B crossfade, and combined LFO motion. Reproduce it with:
+
+```
+cargo run --release --offline --locked --example modulation_demo
+```
+
+Modulation LFOs are free-running, not host-tempo-synced. Shared balance/effect
+routes use layer A's clock; if you only need per-note movement, either layer can
+carry the route. The editor previews are `preview-mod.png`, `preview-lfo.png`
+and `preview-macros.png`.
+
 ## Run it
 
 On this Mac, after building, open:
@@ -199,7 +262,8 @@ Use a lower gain when stacking many voices.
 
 - Pulse (12.5%, 25%, 50%), stepped triangle, 4-bit random, and long/short LFSR noise.
 - Two independently tuned/panned oscillator layers; 1–64 voices and ADSR per layer.
-- Velocity, per-channel pitch bend and mod wheel.
+- Velocity, per-channel pitch bend and mod wheel, channel pressure, poly aftertouch and CC74 timbre.
+- Four-route modulation matrix, two LFOs, four macros and MPE note expression.
 - Mono legato with glide and return to the previous held note; retrigger mode;
   legacy ascending/descending arpeggios with frame, tempo, or seconds clocks.
 - Independent arpeggiator: five patterns, 1–4 octaves, gate, swing, latch,
@@ -347,7 +411,8 @@ The three switches above the grid enable/disable lanes independently of the tab.
 The **TEXT** field stays available for the selected lane. Press Return, leave
 the field, or click **APPLY TEXT**. Invalid text retains the last compiled pattern.
 Graphical edits update the text; text edits update the graph. Markers are encoded
-in the existing sequence text grammar; version-3 state stores both banks.
+in the existing sequence text grammar; version-4 state stores both banks and
+the modulation matrix.
 
 Values advance at **FRAME CLOCK**, 60 Hz by default. Examples:
 
@@ -370,7 +435,7 @@ expanded frames. Invalid edits keep the last valid sequence.
 The grammar deliberately rejects malformed legacy forms, ignored trailing text,
 empty release tails, zero/negative repeats, and overflowing integers. Original
 Rebit/Magical8bitPlug2 presets and DAW states are not imported. Rust patches use
-`RebitRust` version 3 state, with version-1/2 migration, and cannot overwrite an
+`RebitRust` version 4 state, with version-1/2/3 migration, and cannot overwrite an
 original plugin instance.
 
 ## Changes from the C++ edition
