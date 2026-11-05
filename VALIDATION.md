@@ -35,8 +35,8 @@ cargo run --release --offline --locked --bin rebit-render -- demo.wav pulse
 ```
 
 Remaining work includes broader DAW coverage, Developer ID signing and
-notarization, listening tests, and performance profiling. No measured speedup or
-sample-identity claim is made. The original C++ implementation and installed
+notarization, listening tests, and performance optimization based on the
+measurements below. No measured speedup or sample-identity claim is made. The original C++ implementation and installed
 plugins were not modified.
 
 ## Installed AU validation after permission update
@@ -602,3 +602,66 @@ Tooling used locally: Homebrew `rustup` 1.29.3 and Rust 1.97.1 with
 Limits: x86_64 was tested through Rosetta on Apple Silicon, not on Intel
 hardware. Builds remain ad-hoc signed and are not notarized; Developer ID
 signing and notarization are still pending.
+
+## Resizable editor, 2026-11-05
+
+The 1320x1080 design now renders inside a scaled content component. The editor
+opens at a scale derived from the primary display's user area (40 px horizontal
+and 80 px vertical margin), clamped to 50%-100%. Dragging the bottom-right
+corner resizes the window, with the design aspect ratio locked and a range of
+660x540 to 2640x2160. Controls, text, meters, sequence editing, and keyboard
+input all scale together.
+
+- Native checks confirm `isResizable()`, the named scaled design component, and
+  a forced 990x810 resize producing a 0.75 scale transform.
+- All four CTest groups pass.
+- `preview.png` is the full 1320x1080 design at 1.5x; `preview-small.png` is the
+  660x540 floor at 1.5x. Both were inspected from the actual editor.
+- The default preview on this machine now opens around 996x815 instead of the
+  previous fixed 1320x1080.
+
+Limits: host window constraints can override the requested size, and this was
+not exercised interactively in every DAW. Tooltips and native popup menus are
+not part of the scaled content; they remain at normal UI size. No exhaustive
+mouse-coordinate testing at every scale was performed.
+
+## Performance profile, 2026-11-05
+
+A separate profiling pass measured the Rust DSP through `LayerMixer` at 48 kHz,
+128-frame blocks, 10 seconds of audio per run and the median of 7 runs on an
+Apple M5 Pro (macOS 27, rustc 1.97.1). No repository code was changed.
+
+| Scenario | Realtime factor | % of one core |
+|---|---:|---:|
+| 1 layer, 1 voice | 294x | 0.34% |
+| 1 layer, 16 voices | 59.5x | 1.68% |
+| 1 layer, 64 voices | 17.1x | 5.86% |
+| 2 layers, 32 + 32 voices | 16.8x | 5.96% |
+| 2 layers, 64 + 64 voices | 8.6x | 11.61% |
+| 2 layers, 32 + 32 + full effects | 16.1x | 6.22% |
+| 1 layer, 16 voices, Clean instead of Raw | 52.7x | 1.90% |
+| 2 layers, 64 + 64 + FX + modulation | 8.4x | 11.88% |
+
+Observed findings:
+
+- Voice cost is linear at about 0.087-0.089% of one core per held Raw pulse
+  voice, plus a small fixed cost.
+- Two layers cost roughly 1.8-2.0x one layer at the same per-layer voice count.
+- Effects add only about 2-4% wall time at these settings; the effect math by
+  itself is small.
+- Clean costs about 10-16% more than Raw; oscillator leaf share roughly doubles.
+- Modulation route evaluation is the largest leaf hotspot (24-33%) even when
+  all route amounts are zero. Sine LFO evaluation is also expensive; replacing
+  unrouted sine LFOs with sample-and-hold made 16 voices about 19% faster.
+- `global_modulation_step` scans the full 64-voice array each sample, and
+  `Engine::render` scans slots up to `max_poly` even when only one voice sounds.
+- Effects and sequence lanes were minor in this workload. No superlinear voice
+  scaling was observed up to 128 total voices.
+
+Recommended next optimization work, to be measured before claiming a win:
+active-route fast paths, hoisting/shared LFO evaluation when retrigger is off,
+caching the representative voice for global modulation, and tracking active
+voice ranges instead of scanning all slots. The profile covered steady held
+notes only; release tails, voice stealing, arpeggiator, host transport,
+multi-channel expression, larger buffers, and the AU/FFI wrapper remain to be
+measured.

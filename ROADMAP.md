@@ -216,3 +216,16 @@ VST3 host, and AU host checks pass under Rosetta. The universal AU is installed
 and native Apple AU validation succeeds. Signing and notarization remain
 optional release work requiring Apple Developer credentials; builds stay ad-hoc
 signed until then.
+
+## Release hardening: resizable editor
+
+Completed 2026-11-05. The editor now renders its 1320x1080 design through a
+scaled content layer. It opens at a scale that fits the primary display and can
+be resized by dragging the bottom-right corner. Aspect ratio is locked, with a
+50% to 200% range (660x540 to 2640x2160), and all controls, text, meters,
+sequence editing, and keyboard input scale with the design. The previous fixed
+1320x1080 window could exceed smaller laptop displays.
+
+Native checks cover the resizable flag, the scaled design component, and a
+forced 990x810 resize at 75%. Full and 50% editor previews are
+`preview.png` and `preview-small.png`.

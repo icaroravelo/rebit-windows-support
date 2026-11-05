@@ -469,15 +469,29 @@ struct RebitEditor::PlaybackDisplay final : juce::Component, juce::SettableToolt
     }
 };
 
+struct RebitEditor::ScaledContent final : public juce::Component
+{
+    explicit ScaledContent (RebitEditor& editor) : owner (editor)
+    {
+        setName ("Design canvas");
+        setOpaque (true);
+    }
+    void paint (juce::Graphics& g) override { owner.paintDesign (g); }
+    RebitEditor& owner;
+};
+
 RebitEditor::RebitEditor (RebitProcessor& p)
     : AudioProcessorEditor (p), instrument (p), theme (std::make_unique<RebitLookAndFeel>()),
       keyboard (std::make_unique<Keyboard> (p.keyboard))
 {
     setLookAndFeel (theme.get()); setOpaque (true);
-    auto knob = [this] (const char* id, const char* name, const char* suffix, juce::Colour accent)
+    scaledContent = std::make_unique<ScaledContent> (*this);
+    addAndMakeVisible (*scaledContent);
+    auto add = [this] (juce::Component& component) { scaledContent->addAndMakeVisible (component); };
+    auto knob = [this, &add] (const char* id, const char* name, const char* suffix, juce::Colour accent)
     {
         auto control = std::make_unique<Knob> (instrument.state, id, name, suffix, accent);
-        addAndMakeVisible (*control);
+        add (*control);
         control->slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
         control->slider.lookAndFeelChanged();
         knobs.push_back (std::move (control));
@@ -492,10 +506,10 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     knob ("sweepTime", "SWEEP TIME", " s", violet);
     knob ("arpGate", "GATE", " %", cyan);knob ("arpSwing", "SWING", " %", cyan);
     knob ("arpSeconds", "STEP TIME", " s", cyan);
-    auto choice = [this] (const char* id, const char* name, juce::StringArray options, juce::Colour accent)
+    auto choice = [this, &add] (const char* id, const char* name, juce::StringArray options, juce::Colour accent)
     {
         auto control = std::make_unique<Choice> (instrument.state, id, name, options, accent);
-        addAndMakeVisible (*control); choices.push_back (std::move (control));
+        add (*control); choices.push_back (std::move (control));
     };
     choice ("osc", "WAVEFORM", { "Pulse / square", "Stepped triangle", "Noise" }, mint);
     choice ("duty", "PULSE WIDTH", { "12.5%", "25%", "50%" }, mint);
@@ -508,12 +522,12 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     choice ("arpOctaves", "OCTAVES", {"1","2","3","4"}, cyan);
     choice ("arpArticulation", "ENVELOPE", {"Retrigger","Legato"}, cyan);
     choice ("sequenceClock", "FRAME CLOCK", {"60 Hz","1/4","1/8","1/16","1/32","1/64","1/8 triplet","1/16 triplet"}, cyan);
-    hostSync.setColour(accentColourId,cyan);addAndMakeVisible(hostSync);
+    hostSync.setColour(accentColourId,cyan);add(hostSync);
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"hostSync",hostSync));
     hostSync.setTooltip("Align musical arp and sequence clocks with host play/stop and PPQ. Seconds stays free. Without complete host timing, clocks free-run. Turn off for stopped-host audition.");
     choices[sequenceClock]->box.setTooltip("60 Hz keeps note-relative chip frames. Musical frames align to host PPQ with Host sync on; while stopped or without host timing they advance at the selected tempo rate.");
     for(auto* button:{&arpTab,&monoTab,&modTab,&arpStop}){
-        button->getProperties().set("sequenceSmall",true);button->setColour(accentColourId,cyan);addAndMakeVisible(*button);
+        button->getProperties().set("sequenceSmall",true);button->setColour(accentColourId,cyan);add(*button);
     }
     modTab.setColour(accentColourId,violet);modTab.setName("Modulation page");
     arpTab.onClick=[this]{performancePage=0;updatePerformance();};monoTab.onClick=[this]{performancePage=1;updatePerformance();};
@@ -521,7 +535,7 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     arpStop.onClick=[this]{instrument.stopArpeggiator();};
     arpStop.setTooltip("Stop all voices and clear held/latched notes. Play a new chord to restart.");
     arpEnabled.setColour(accentColourId,cyan);arpLatch.setColour(accentColourId,cyan);
-    addAndMakeVisible(arpEnabled);addAndMakeVisible(arpLatch);
+    add(arpEnabled);add(arpLatch);
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"arpEnabled",arpEnabled));
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"arpLatch",arpLatch));
     arpEnabled.setTooltip("Turn held chords into an arpeggio at any voice count. The new arp overrides legacy mono arpeggios.");
@@ -533,37 +547,37 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     choices[oscillator]->box.setTooltip("Waveform changes crossfade over 5 ms while held notes keep their phase and sequence position.");
     choices[pulseDuty]->box.setTooltip("Manual pulse-width edits crossfade over 5 ms. Duty sequence frames retain their chip-style steps.");
     choices[noiseAlgorithm]->box.setTooltip("Noise types crossfade over 5 ms during playback.");
-    for(int i=0;i<4;++i){routeRows[(size_t)i]=std::make_unique<RouteRow>(instrument.state,i);addAndMakeVisible(*routeRows[(size_t)i]);}
+    for(int i=0;i<4;++i){routeRows[(size_t)i]=std::make_unique<RouteRow>(instrument.state,i);add(*routeRows[(size_t)i]);}
     const juce::StringArray lfoShapes{"Sine","Triangle","Square","Ramp up","Ramp down","Sample & hold"};
     const char* shapeIds[]={"lfo1Shape","lfo2Shape"};const char* rateIds[]={"lfo1Rate","lfo2Rate"};const char* retriggerIds[]={"lfo1Retrigger","lfo2Retrigger"};
     for(int i=0;i<2;++i){
         lfoShape[(size_t)i]=std::make_unique<Choice>(instrument.state,shapeIds[i],i==0?"LFO 1 SHAPE":"LFO 2 SHAPE",lfoShapes,violet);
         lfoShape[(size_t)i]->box.setTooltip("Shared modulation LFO. Sample & hold changes once per cycle. Per-note routes use each voice's own copy.");
-        addAndMakeVisible(*lfoShape[(size_t)i]);
+        add(*lfoShape[(size_t)i]);
         lfoRate[(size_t)i]=std::make_unique<Knob>(instrument.state,rateIds[i],i==0?"LFO 1 RATE":"LFO 2 RATE"," Hz",violet);
         lfoRate[(size_t)i]->slider.setTooltip("Free-running rate from 0.01 to 20 Hz. Host tempo sync is not applied to modulation LFOs.");
-        addAndMakeVisible(*lfoRate[(size_t)i]);
+        add(*lfoRate[(size_t)i]);
         lfoRetrigger[(size_t)i].setButtonText(i==0?"Retrigger 1":"Retrigger 2");lfoRetrigger[(size_t)i].setName(i==0?"LFO 1 retrigger":"LFO 2 retrigger");
         lfoRetrigger[(size_t)i].setColour(accentColourId,violet);
         lfoRetrigger[(size_t)i].setTooltip("Restart this LFO at phase zero on the first note of a chord. Off keeps it free-running.");
-        addAndMakeVisible(lfoRetrigger[(size_t)i]);
+        add(lfoRetrigger[(size_t)i]);
         toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,retriggerIds[i],lfoRetrigger[(size_t)i]));
     }
     const char* macroIds[]={"macro1","macro2","macro3","macro4"};
     for(int i=0;i<4;++i){
         macroKnobs[(size_t)i]=std::make_unique<Knob>(instrument.state,macroIds[i],"MACRO "+juce::String(i+1),"",violet);
         macroKnobs[(size_t)i]->slider.setTooltip("Performance macro, 0 to 100%. Assign it as a source in any route. Values are saved with the patch.");
-        addAndMakeVisible(*macroKnobs[(size_t)i]);
+        add(*macroKnobs[(size_t)i]);
     }
     mpeOn.setColour(accentColourId,violet);mpeOn.setName("MPE enabled");mpeOn.setTooltip("MPE lower-zone mode. Per-channel pitch bend, channel pressure and poly aftertouch work per note; bend range follows MPE BEND. MIDI is forwarded raw, so no extra bridge is required.");
     mpeBend=std::make_unique<Knob>(instrument.state,"mpeBendRange","MPE BEND"," st",violet);
     mpeBend->slider.setTooltip("Pitch-bend range used when MPE is enabled. Typical controllers use 48 semitones.");
-    addAndMakeVisible(mpeOn);addAndMakeVisible(*mpeBend);
+    add(mpeOn);add(*mpeBend);
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"mpeEnabled",mpeOn));
-    for(auto* button:{&vibTab,&lfoTab,&macroTab}){button->getProperties().set("sequenceSmall",true);button->setColour(accentColourId,violet);addAndMakeVisible(*button);}
+    for(auto* button:{&vibTab,&lfoTab,&macroTab}){button->getProperties().set("sequenceSmall",true);button->setColour(accentColourId,violet);add(*button);}
     vibTab.setName("Vibrato page");lfoTab.setName("LFO page");macroTab.setName("Macros page");
     vibTab.onClick=[this]{modulationPage=0;updateModulationPanel();};lfoTab.onClick=[this]{modulationPage=1;updateModulationPanel();};macroTab.onClick=[this]{modulationPage=2;updateModulationPanel();};
-    ignoreWheel.setColour (accentColourId, violet); addAndMakeVisible (ignoreWheel);
+    ignoreWheel.setColour (accentColourId, violet); add (ignoreWheel);
     ignoreWheel.setTooltip ("When enabled, vibrato depth does not depend on MIDI CC1.");
     toggles.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (instrument.state, "vibratoIgnoresWheel_raw", ignoreWheel));
     const char* names[] = { "Volume", "Pitch", "Duty" };
@@ -573,7 +587,7 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     for (size_t i = 0; i < 3; ++i)
     {
         sequenceEnabled[i].setButtonText (names[i]); sequenceEnabled[i].setColour (accentColourId, accents[i]);
-        addAndMakeVisible (sequenceEnabled[i]);
+        add (sequenceEnabled[i]);
         laneAttachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,ids[i],sequenceEnabled[i]);
         auto& editor = sequenceEditors[i]; editor.setName (juce::String (names[i]) + " sequence");
         editor.setMultiLine (false); editor.setReturnKeyStartsNewLine (false); editor.setFont (type (12, true));
@@ -582,9 +596,9 @@ RebitEditor::RebitEditor (RebitProcessor& p)
         editor.setIndents (12, 8);
         editor.setTooltip (juce::String (names[i]) + " sequence: comma-separated values, [loop], | release. Press Return to apply.");
         editor.onReturnKey = [this, i] { applySequence ((int) i); };
-        editor.onFocusLost = [this, i] { if(!switchingLayer)applySequence ((int) i); }; addAndMakeVisible (editor);
+        editor.onFocusLost = [this, i] { if(!switchingLayer)applySequence ((int) i); }; add (editor);
     }
-    sequenceCanvas=std::make_unique<SequenceCanvas>(instrument);
+    sequenceCanvas=std::make_unique<SequenceCanvas>(instrument);sequenceCanvas->setName("Sequence canvas");
     sequenceCanvas->onLaneChanged=[this](int lane){
         for(size_t i=0;i<3;++i)sequenceEditors[i].setVisible((int)i==lane);
     };
@@ -595,27 +609,27 @@ RebitEditor::RebitEditor (RebitProcessor& p)
         sequenceStatus.setColour(juce::Label::textColourId,muted);
         sequenceStatus.setText("Draw steps. Drag LOOP / REL markers. Arrow keys fine-tune values.",juce::dontSendNotification);
     };
-    addAndMakeVisible(*sequenceCanvas);
+    add(*sequenceCanvas);
     for(size_t i=1;i<3;++i)sequenceEditors[i].setVisible(false);
-    applySequences.setButtonText ("APPLY TEXT  +"); addAndMakeVisible (applySequences);
+    applySequences.setButtonText ("APPLY TEXT  +"); add (applySequences);
     applySequences.onClick = [this] { applySequence(sequenceCanvas->lane()); };
     sequenceStatus.setText ("Draw steps. Drag LOOP / REL markers. Arrow keys fine-tune values.", juce::dontSendNotification);
     sequenceStatus.setFont (type (10.5f, true)); sequenceStatus.setColour (juce::Label::textColourId, muted);
-    addAndMakeVisible (sequenceStatus);
+    add (sequenceStatus);
     keyboard->setAvailableRange (24, 108); keyboard->setKeyWidth (36); keyboard->setLowestVisibleKey (48);
     keyboard->setBlackNoteLengthProportion (0.62f); keyboard->setScrollButtonWidth (20);
     keyboard->setVelocity (0.8f, true); keyboard->setColour (juce::MidiKeyboardComponent::whiteNoteColourId, panel);
     keyboard->setColour (juce::MidiKeyboardComponent::blackNoteColourId, inset);
     keyboard->setColour (juce::MidiKeyboardComponent::shadowColourId, juce::Colours::transparentBlack);
-    addAndMakeVisible (*keyboard);
+    add (*keyboard);
     if(choices[monoBehavior]->box.getSelectedItemIndex()==1||choices[monoBehavior]->box.getSelectedItemIndex()==2)
         performancePage=arpEnabled.getToggleState()?0:1;
-    playbackDisplay=std::make_unique<PlaybackDisplay>(instrument);addAndMakeVisible(*playbackDisplay);
-    for(auto* button:{&editA,&editB}){button->getProperties().set("sequenceSmall",true);addAndMakeVisible(*button);}
+    playbackDisplay=std::make_unique<PlaybackDisplay>(instrument);add(*playbackDisplay);
+    for(auto* button:{&editA,&editB}){button->getProperties().set("sequenceSmall",true);add(*button);}
     editA.setName("Edit layer A");editB.setName("Edit layer B");
     editA.onClick=[this]{selectLayer(0);};editB.onClick=[this]{selectLayer(1);};
     editA.setColour(accentColourId,mint);editB.setColour(accentColourId,violet);editA.setToggleState(true,juce::dontSendNotification);
-    layerAOn.setColour(accentColourId,mint);layerBOn.setColour(accentColourId,violet);addAndMakeVisible(layerAOn);addAndMakeVisible(layerBOn);
+    layerAOn.setColour(accentColourId,mint);layerBOn.setColour(accentColourId,violet);add(layerAOn);add(layerBOn);
     layerAOn.setTooltip("Layer A audio on/off. MIDI and the shared performance clock continue while muted.");
     layerBOn.setTooltip("Layer B audio on/off. Enabling starts its own envelope/sequences from the held chord and current arp step. Disabled B skips synthesis after the short fade.");
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"layerAEnabled",layerAOn));
@@ -623,17 +637,17 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     const char* mixIds[]={"layerAGain","layerAPan","layerATranspose","layerADetune"};
     const char* mixNames[]={"LAYER LEVEL","PAN","TRANSPOSE","DETUNE"};const char* suffixes[]={"",""," st"," ct"};
     for(size_t i=0;i<4;++i){
-        layerKnobs[i]=std::make_unique<Knob>(instrument.state,mixIds[i],mixNames[i],suffixes[i],mint);addAndMakeVisible(*layerKnobs[i]);
+        layerKnobs[i]=std::make_unique<Knob>(instrument.state,mixIds[i],mixNames[i],suffixes[i],mint);add(*layerKnobs[i]);
         layerKnobs[i]->slider.setColour(juce::Slider::textBoxOutlineColourId,juce::Colours::transparentBlack);layerKnobs[i]->slider.lookAndFeelChanged();
     }
     layerKnobs[1]->slider.setTooltip("Stereo balance. Centre preserves unity in both channels; hard left/right silences the opposite channel. Mono outputs average left/right.");
     soundMode=std::make_unique<Choice>(instrument.state,"layerASoundMode","SOUND MODE",juce::StringArray{"Raw","Clean"},mint);
-    soundMode->box.setName("Layer sound mode");soundMode->box.setTooltip("Raw preserves the original pulse and stepped triangle. Clean reduces oscillator aliasing with smoothed edges and a continuous triangle. Noise stays unchanged. Switching fades over 5 ms.");addAndMakeVisible(*soundMode);
-    effectsOn.setName("Effects enabled");effectsOn.setColour(accentColourId,amber);effectsOn.setTooltip("Enable shared output effects. Off bypasses all effects after a short fade. Neutral settings: Drive 0 dB, Bits 24, Rate 1x. Metering follows the processed output.");addAndMakeVisible(effectsOn);
+    soundMode->box.setName("Layer sound mode");soundMode->box.setTooltip("Raw preserves the original pulse and stepped triangle. Clean reduces oscillator aliasing with smoothed edges and a continuous triangle. Noise stays unchanged. Switching fades over 5 ms.");add(*soundMode);
+    effectsOn.setName("Effects enabled");effectsOn.setColour(accentColourId,amber);effectsOn.setTooltip("Enable shared output effects. Off bypasses all effects after a short fade. Neutral settings: Drive 0 dB, Bits 24, Rate 1x. Metering follows the processed output.");add(effectsOn);
     toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"fxEnabled",effectsOn));
     const char* fxIds[]={"fxDrive","fxBits","fxRate","fxMix"};const char* fxNames[]={"DRIVE","BITS","RATE DIV","MIX"};const char* fxSuffixes[]={" dB"," bit"," x"," %"};
     for(size_t i=0;i<4;++i){
-        effectKnobs[i]=std::make_unique<Knob>(instrument.state,fxIds[i],fxNames[i],fxSuffixes[i],amber);addAndMakeVisible(*effectKnobs[i]);
+        effectKnobs[i]=std::make_unique<Knob>(instrument.state,fxIds[i],fxNames[i],fxSuffixes[i],amber);add(*effectKnobs[i]);
         effectKnobs[i]->slider.setColour(juce::Slider::textBoxOutlineColourId,juce::Colours::transparentBlack);effectKnobs[i]->slider.lookAndFeelChanged();
     }
     effectKnobs[0]->slider.setTooltip("Normalized soft saturation. 0 dB is neutral; higher drive adds harmonics. This stage can create aliasing even with Clean oscillators.");
@@ -674,12 +688,12 @@ RebitEditor::RebitEditor (RebitProcessor& p)
             deletePreset.setEnabled(instrument.isUserPreset(presetBox.getSelectedItemIndex()));
         }else presetStatus.setText("Could not delete user preset.",juce::dontSendNotification);
     };
-    addAndMakeVisible(presetName);addAndMakeVisible(savePreset);addAndMakeVisible(deletePreset);
+    add(presetName);add(savePreset);add(deletePreset);
     refreshPresets();
     presetBox.onChange=[this]{if(loadingPreset)return;const auto index=presetBox.getSelectedItemIndex();if(index>=0){instrument.loadPreset(index);presetStatus.setText("Loaded "+presetBox.getText(),juce::dontSendNotification);undoButton.setEnabled(true);deletePreset.setEnabled(instrument.isUserPreset(index));}};
     presetPrev.onClick=[this]{if(presetBox.getNumItems()==0)return;presetBox.setSelectedItemIndex(juce::jmax(0,presetBox.getSelectedItemIndex()-1),juce::sendNotificationSync);};
     presetNext.onClick=[this]{if(presetBox.getNumItems()==0)return;presetBox.setSelectedItemIndex(juce::jmin(presetBox.getNumItems()-1,presetBox.getSelectedItemIndex()+1),juce::sendNotificationSync);};
-    addAndMakeVisible(presetBox);addAndMakeVisible(presetPrev);addAndMakeVisible(presetNext);addAndMakeVisible(presetStatus);
+    add(presetBox);add(presetPrev);add(presetNext);add(presetStatus);
     seedEditor.setName("Random seed");seedEditor.setText("1",false);seedEditor.setInputRestrictions(9,"0123456789");
     seedEditor.setFont(type(12,true));seedEditor.setIndents(8,5);
     seedEditor.setTooltip("Deterministic random seed. The same starting patch, seed and locks produce the same randomization.");
@@ -688,7 +702,7 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     newSeed.onClick=[this]{seedEditor.setText(juce::String(juce::Random::getSystemRandom().nextInt(999999999)+1),false);};
     const char* lockNames[]={"OSC","ENV","SEQ","MOD","FX","MIX"};
     const char* lockTips[]={"Lock oscillator and sound mode settings.","Lock both layers' ADSR envelopes.","Lock sequence text, lane enables and frame clock.","Lock matrix routes, LFOs and macros.","Lock the shared effects chain.","Lock layers, voices, levels, pans, tuning and master gain."};
-    for(int i=0;i<6;++i){randomLocks[(size_t)i].setButtonText(lockNames[i]);randomLocks[(size_t)i].setName(juce::String("Lock ")+lockNames[i]);randomLocks[(size_t)i].setColour(accentColourId,violet);randomLocks[(size_t)i].setTooltip(lockTips[i]);addAndMakeVisible(randomLocks[(size_t)i]);}
+    for(int i=0;i<6;++i){randomLocks[(size_t)i].setButtonText(lockNames[i]);randomLocks[(size_t)i].setName(juce::String("Lock ")+lockNames[i]);randomLocks[(size_t)i].setColour(accentColourId,violet);randomLocks[(size_t)i].setTooltip(lockTips[i]);add(randomLocks[(size_t)i]);}
     randomStatus.setFont(type(10,true));randomStatus.setColour(juce::Label::textColourId,muted);
     randomStatus.setText("Seed 1 - all sections unlocked.",juce::dontSendNotification);
     randomizeButton.setName("Randomize");randomizeButton.setTooltip("Randomize every unlocked section using the seed. Undo restores the previous patch.");
@@ -705,8 +719,22 @@ RebitEditor::RebitEditor (RebitProcessor& p)
         undoButton.setEnabled(instrument.canUndo());
     };
     undoButton.onClick=[this]{instrument.undo();randomStatus.setText("Last preset or randomization undone.",juce::dontSendNotification);presetStatus.setText("Previous patch restored.",juce::dontSendNotification);undoButton.setEnabled(instrument.canUndo());};
-    addAndMakeVisible(seedEditor);addAndMakeVisible(newSeed);addAndMakeVisible(randomizeButton);addAndMakeVisible(undoButton);addAndMakeVisible(randomStatus);
-    setSize (1320, 1080); updatePerformance();updateModulationPanel();startTimerHz (15); timerCallback();
+    add(seedEditor);add(newSeed);add(randomizeButton);add(undoButton);add(randomStatus);
+    setResizable (true, true);
+    setResizeLimits (660, 540, 2640, 2160);
+    if (auto* constrainer = getConstrainer())
+        constrainer->setFixedAspectRatio (1320.0 / 1080.0);
+    float initialScale = 1.0f;
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+    {
+        const auto area = display->userArea;
+        initialScale = juce::jlimit (0.5f, 1.0f,
+            juce::jmin ((float) (area.getWidth() - 40) / 1320.0f,
+                        (float) (area.getHeight() - 80) / 1080.0f));
+    }
+    setSize (juce::roundToInt (1320.0f * initialScale),
+             juce::roundToInt (1080.0f * initialScale));
+    updatePerformance();updateModulationPanel();startTimerHz (15); timerCallback();
 }
 
 RebitEditor::~RebitEditor()
@@ -750,7 +778,7 @@ void RebitEditor::selectLayer(int layer) {
     soundMode->bind(instrument.state,layer==0?"layerASoundMode":"layerBSoundMode");
     editA.setToggleState(layer==0,juce::dontSendNotification);editB.setToggleState(layer==1,juce::dontSendNotification);
     sequenceStatus.setText(layer==0?"Editing layer A. Performance and modulation are shared.":"Editing layer B. Performance and modulation are shared.",juce::dontSendNotification);
-    switchingLayer=false;timerCallback();repaint();
+    switchingLayer=false;timerCallback();scaledContent->repaint();
 }
 
 void RebitEditor::applySequence (int index)
@@ -797,7 +825,7 @@ void RebitEditor::updatePerformance()
     for(auto index:{arpGate,arpSwing,arpSeconds})knobs[(size_t)index]->setVisible(arp);
     arpLatch.setVisible(arp);arpStop.setVisible(arp);hostSync.setVisible(arp);arpEnabled.setVisible(arp);
     for(auto& row:routeRows)if(row)row->setVisible(mod);
-    repaint(24,346,478,184);
+    scaledContent->repaint(24,346,478,184);
 }
 void RebitEditor::updateModulationPanel()
 {
@@ -812,7 +840,7 @@ void RebitEditor::updateModulationPanel()
     for(auto& retrigger:lfoRetrigger)retrigger.setVisible(lfo);
     for(auto& macro:macroKnobs)if(macro)macro->setVisible(macros);
     mpeOn.setVisible(macros);if(mpeBend)mpeBend->setVisible(macros);
-    repaint(518,346,578,184);
+    scaledContent->repaint(518,346,578,184);
 }
 
 void RebitEditor::timerCallback()
@@ -837,20 +865,34 @@ void RebitEditor::timerCallback()
     for(auto& knob:effectKnobs)if(knob)knob->setEnabled(effectsOn.getToggleState());
     undoButton.setEnabled(instrument.canUndo());
     deletePreset.setEnabled(instrument.isUserPreset(presetBox.getSelectedItemIndex()));
-    repaint(1120,532,176,272);
+    scaledContent->repaint(1120,532,176,272);
     midiActive = false;
     for (int note = 0; note < 128; ++note)
         if (instrument.keyboard.isNoteOnForChannels (0xffff, note)) { midiActive = true; break; }
-    repaint (380, 24, 716, 112); repaint (950, 196, 130, 126);
+    scaledContent->repaint (380, 24, 716, 112); scaledContent->repaint (950, 196, 130, 126);
 }
 
 void RebitEditor::paint (juce::Graphics& g)
 {
+    g.fillAll (juce::Colours::black);
+}
+
+void RebitEditor::paintOverChildren (juce::Graphics& g)
+{
+    const int size = 10, x = getWidth() - size - 3, y = getHeight() - size - 3;
+    g.setColour (muted.withAlpha (0.65f));
+    for (int i = 0; i < 3; ++i)
+        g.drawLine ((float) (x + i * 3), (float) (y + size),
+                    (float) (x + size), (float) (y + i * 3), 1.0f);
+}
+
+void RebitEditor::paintDesign (juce::Graphics& g)
+{
     g.fillAll (background);
     // A quiet grid along the chassis, outside the controls.
     g.setColour (line.withAlpha (0.25f));
-    for (int x = 16; x < getWidth(); x += 16)
-        for (int y = 16; y < getHeight(); y += 16) g.fillRect (x, y, 1, 1);
+    for (int x = 16; x < 1320; x += 16)
+        for (int y = 16; y < 1080; y += 16) g.fillRect (x, y, 1, 1);
     pixelSpark (g, 33, 49, magenta);
     pixelLogo (g, 80, 42, 6);
     caption (g, "SMALL WAVES. BIG WORLDS.", { 33, 95, 310, 18 }, muted, 10.5f, true);
@@ -952,14 +994,23 @@ void RebitEditor::paint (juce::Graphics& g)
     caption (g, "PLAY", { 25, 968, 60, 18 }, mint, 10, true);
     caption (g, "MIDI input or click the keys", { 81, 968, 280, 18 }, muted, 10);
     caption (g, "SCROLL TO CHANGE OCTAVE", { 882, 968, 214, 18 }, muted, 9, true);
-    g.setColour (line); g.drawHorizontalLine (1057, 24, (float)getWidth()-24.f);
+    g.setColour (line); g.drawHorizontalLine (1057, 24, (float)1320-24.f);
     caption (g, "REBIT RUST", { 24, 1061, 140, 15 }, muted, 8.5f, true);
     caption (g, "PULSE / TRIANGLE / NOISE", { 426, 1061, 300, 15 }, muted, 8.5f, true);
-    caption (g, juce::String ("v") + JucePlugin_VersionString, { getWidth()-72, 1061, 48, 15 }, muted, 8.5f, true);
+    caption (g, juce::String ("v") + JucePlugin_VersionString, { 1320-72, 1061, 48, 15 }, muted, 8.5f, true);
 }
 
 void RebitEditor::resized()
 {
+    if (scaledContent != nullptr)
+    {
+        const float width = (float) getWidth(), height = (float) getHeight();
+        const float scale = juce::jmin (width / 1320.0f, height / 1080.0f);
+        const float tx = (width - 1320.0f * scale) * 0.5f;
+        const float ty = (height - 1080.0f * scale) * 0.5f;
+        scaledContent->setBounds (0, 0, 1320, 1080);
+        scaledContent->setTransform (juce::AffineTransform::scale (scale).translated (tx, ty));
+    }
     if(playbackDisplay)playbackDisplay->setBounds(550,35,530,91);
     choices[oscillator]->setBounds (40, 202, 198, 48);
     choices[pulseDuty]->setBounds (40, 267, 94, 46);
@@ -998,7 +1049,7 @@ void RebitEditor::resized()
     applySequences.setBounds (868, 744, 208, 30);
     sequenceStatus.setBounds (96, 781, 980, 20);
     sequenceCanvas->setBounds(40,584,1032,148);
-    keyboard->setBounds (24, 993, getWidth()-48, 54);
+    keyboard->setBounds (24, 993, 1320-48, 54);
     editA.setBounds(1124,57,76,27);editB.setBounds(1210,57,76,27);
     layerAOn.setBounds(1124,98,76,22);layerBOn.setBounds(1210,98,76,22);
     for(size_t i=0;i<4;++i)if(layerKnobs[i])layerKnobs[i]->setBounds(1120+(int)(i%2)*88,208+(int)(i/2)*130,88,113);

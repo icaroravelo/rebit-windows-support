@@ -1,6 +1,11 @@
 #include "PluginProcessor.h"
 #include <iostream>
 #include "TestPlayHead.h"
+template<class T> T* findControl(juce::Component& root,const juce::String& name) {
+    if(root.getName()==name)if(auto* found=dynamic_cast<T*>(&root))return found;
+    for(auto* child:root.getChildren())if(auto* found=findControl<T>(*child,name))return found;
+    return nullptr;
+}
 int main(int argc,char** argv) {
     juce::ScopedJuceInitialiser_GUI init;
     TestPlayHead host;
@@ -14,6 +19,7 @@ int main(int argc,char** argv) {
     const bool macroPage=mode=="--macros";
     const bool randomPage=mode=="--random";
     const bool userPage=mode=="--user";
+    const bool smallPage=mode=="--small";
     const bool dual=colour||modPage||lfoPage||macroPage||mode=="--showcase"||mode=="--layer-b";
     if(dual) {
         auto set=[&](const char* id,float value){if(auto* p=processor->state.getParameter(id))p->setValueNotifyingHost(p->convertTo0to1(value));};
@@ -57,24 +63,20 @@ int main(int argc,char** argv) {
         processor->saveUserPreset("Neon Bass");
     }
     auto editor=std::unique_ptr<juce::AudioProcessorEditor>(processor->createEditor());
-    if(argc>2&&juce::String(argv[2])=="--layer-b")for(auto* child:editor->getChildren())
-        if(child->getName()=="Edit layer B")if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();
-    auto clickPage=[&](const juce::String& name){for(auto* child:editor->getChildren())if(child->getName()==name)if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();};
+    editor->setSize(smallPage?660:1320,smallPage?540:1080);
+    if(argc>2&&juce::String(argv[2])=="--layer-b")
+        if(auto* button=findControl<juce::TextButton>(*editor,"Edit layer B"))button->onClick();
+    auto clickPage=[&](const juce::String& name){if(auto* button=findControl<juce::TextButton>(*editor,name))button->onClick();};
     if(modPage||lfoPage||macroPage)clickPage("Modulation page");
     if(lfoPage)clickPage("LFO page");
     if(macroPage)clickPage("Macros page");
-    if(userPage){
-        for(auto* child:editor->getChildren())
-            if(child->getName()=="Preset browser")
-                if(auto* box=dynamic_cast<juce::ComboBox*>(child))
-                    box->setSelectedItemIndex(box->getNumItems()-1,juce::sendNotificationSync);
-    }
+    if(userPage)
+        if(auto* box=findControl<juce::ComboBox>(*editor,"Preset browser"))
+            box->setSelectedItemIndex(box->getNumItems()-1,juce::sendNotificationSync);
     if(randomPage){
-        for(auto* child:editor->getChildren()){
-            if(child->getName()=="Random seed")if(auto* field=dynamic_cast<juce::TextEditor*>(child))field->setText("20261105",false);
-            if(child->getName()=="Lock ENV")if(auto* lock=dynamic_cast<juce::ToggleButton*>(child))lock->setToggleState(true,juce::dontSendNotification);
-            if(child->getName()=="Randomize")if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();
-        }
+        if(auto* field=findControl<juce::TextEditor>(*editor,"Random seed"))field->setText("20261105",false);
+        if(auto* lock=findControl<juce::ToggleButton>(*editor,"Lock ENV"))lock->setToggleState(true,juce::dontSendNotification);
+        if(auto* button=findControl<juce::TextButton>(*editor,"Randomize"))button->onClick();
     }
     editor->setVisible(true);
     auto image=editor->createComponentSnapshot(editor->getLocalBounds(),true,1.5f);

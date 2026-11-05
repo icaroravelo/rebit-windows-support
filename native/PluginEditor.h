@@ -13,9 +13,12 @@ public:
     explicit RebitEditor (RebitProcessor&);
     ~RebitEditor() override;
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    void paintDesign (juce::Graphics&);
     void resized() override;
 
 private:
+    struct ScaledContent;
     struct Knob;
     struct Choice;
     struct RouteRow;
@@ -27,6 +30,7 @@ private:
     enum ChoiceIndex { oscillator, pulseDuty, noiseAlgorithm, monoBehavior, arpInterval, pitchMode, arpPattern, arpRate, arpOctaves, arpArticulation, sequenceClock };
     RebitProcessor& instrument;
     std::unique_ptr<RebitLookAndFeel> theme;
+    std::unique_ptr<ScaledContent> scaledContent;
     std::vector<std::unique_ptr<Knob>> knobs;
     std::vector<std::unique_ptr<Choice>> choices;
     juce::ToggleButton ignoreWheel { "Independent of mod wheel" };

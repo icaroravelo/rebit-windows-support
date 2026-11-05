@@ -57,14 +57,11 @@ int main() {
             require(std::abs(audio.getSample(0,0)+.5f)<1e-6f&&std::abs(audio.getSample(1,0)+8.f/15.f)<1e-6f,"Independent layer stereo routing failed");
             const auto activity=layers.playbackInfo();require(activity.layers[0].active==1&&activity.layers[1].active==1&&activity.active==2,"Layer activity did not report both engines");
             auto editor=std::unique_ptr<juce::AudioProcessorEditor>(layers.createEditor());
-            juce::TextButton *editA=nullptr,*editB=nullptr;juce::ComboBox* waveform=nullptr;SequenceCanvas* canvas=nullptr;juce::TextEditor* volumeText=nullptr;
-            for(auto* child:editor->getChildren()){
-                if(child->getName()=="Edit layer A")editA=dynamic_cast<juce::TextButton*>(child);
-                if(child->getName()=="Edit layer B")editB=dynamic_cast<juce::TextButton*>(child);
-                if(auto* graph=dynamic_cast<SequenceCanvas*>(child))canvas=graph;
-                if(child->getName()=="Volume sequence")volumeText=dynamic_cast<juce::TextEditor*>(child);
-                for(auto* nested:child->getChildren())if(nested->getName()=="WAVEFORM")waveform=dynamic_cast<juce::ComboBox*>(nested);
-            }
+            auto* editA=control<juce::TextButton>(*editor,"Edit layer A");
+            auto* editB=control<juce::TextButton>(*editor,"Edit layer B");
+            auto* waveform=control<juce::ComboBox>(*editor,"WAVEFORM");
+            auto* canvas=control<SequenceCanvas>(*editor,"Sequence canvas");
+            auto* volumeText=control<juce::TextEditor>(*editor,"Volume sequence");
             require(editA&&editB&&waveform&&canvas&&volumeText,"Layer editor controls missing");editB->onClick();
             require(waveform->getSelectedItemIndex()==1,"Selecting B did not bind its triangle oscillator");
             waveform->setSelectedItemIndex(2,juce::sendNotificationSync);
@@ -105,9 +102,7 @@ int main() {
             require(burst.active==0&&burst.held==0&&burst.released==0&&burst.fading==0,"Finished burst left active voice feedback");
             // Opening the real editor after a burst must retain clip history.
             auto editor=std::unique_ptr<juce::AudioProcessorEditor>(feedback.createEditor());
-            juce::TextButton* clip=nullptr;
-            for(auto* child:editor->getChildren())for(auto* nested:child->getChildren())
-                if(nested->getName()=="Clear output clipping")clip=dynamic_cast<juce::TextButton*>(nested);
+            auto* clip=control<juce::TextButton>(*editor,"Clear output clipping");
             require(clip&&clip->getToggleState(),"Real editor did not show the latched clip indication");
             clip->onClick();require(!clip->getToggleState()&&!feedback.playbackInfo().clipped,"Clip reset control did not acknowledge the event");
             feedback.processBlock(audio,events);require(!feedback.playbackInfo().clipped,"Silence re-latched old clip history");
@@ -343,6 +338,11 @@ int main() {
             require(std::abs(presets.state.getRawParameterValue("gain")->load()-.22f)>.0001f,"Editor randomize did not change an unlocked section");
             undo->onClick();
             require(std::abs(presets.state.getRawParameterValue("gain")->load()-.22f)<.001f,"Undo control did not restore the previous patch");
+            require(editor->isResizable(),"Editor is not resizable");
+            auto* design=control<juce::Component>(*editor,"Design canvas");
+            require(design!=nullptr,"Scaled design canvas missing");
+            editor->setSize(990,810);
+            require(std::abs(design->getTransform().mat00-.75f)<.01f,"Editor did not scale the design to 75%");
         }
         {
             auto tempDirectory=[]{

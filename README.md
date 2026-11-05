@@ -32,8 +32,9 @@ patch, `preview-layer-b.png` for B's controls, `preview-colour.png` for Clean/FX
 `preview-mod.png` for the route matrix, `preview-lfo.png` for LFO sources,
 `preview-macros.png` for macros and MPE, `preview-presets.png` for the preset
 browser, `preview-user.png` for a loaded user preset, `preview-random.png` for
-seeded randomization with a locked envelope, and `preview-clipping.png` for
-output above full scale with a releasing voice.
+seeded randomization with a locked envelope, `preview-small.png` at the 50%
+resize floor, and `preview-clipping.png` for output above full scale with a
+releasing voice.
 All are rendered from the actual editor and audio processor; preview patches do
 not change defaults.
 
@@ -64,10 +65,13 @@ stops its synthesis after the fade; enabling it restarts its own envelopes and
 sequences from currently held/pedal-retained notes or the current arp step.
 Expired release tails and discarded pedal-only voices are not recreated.
 
-The editor is now 1320x1080, with the layer controls in a side panel and a
-preset/random panel below the sequencer. Invalid
-sequence drafts must be corrected before switching layers. Each layer's bank
-and playhead stay separate; editing B does not change A's sequence text.
+The editor design is 1320x1080, with the layer controls in a side panel and a
+preset/random panel below the sequencer. It opens scaled to fit the primary
+display and is resizable by dragging the bottom-right corner. The design aspect
+stays locked while every control and label scales; the range is 50% to 200%
+(660x540 to 2640x2160). Invalid sequence drafts must be corrected before
+switching layers. Each layer's bank and playhead stay separate; editing B does
+not change A's sequence text.
 
 New patches use state **version 4**. Version-1 Rust patches load into A with
 unity layer level, center pan and zero added tuning; B is explicitly disabled
