@@ -2,8 +2,106 @@
 //! by the native processor. Its audio thread owns Engine; textMutex owns the
 //! canonical bank, and sequenceLock transfers ownership of pending banks.
 #![allow(clippy::missing_safety_doc)]
+use crate::layers::{LayerMix, LayerMixer};
 use crate::{Engine, Parameters, Sequence, SequenceBank};
 use std::{ptr, slice};
+
+#[no_mangle]
+pub extern "C" fn rebit_engine_new_seeded(seed: u32) -> *mut Engine {
+    Box::into_raw(Box::new(Engine::new(44100., seed)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_engine_tuning(engine: *mut Engine, semitones: f64) {
+    if let Some(engine) = engine.as_mut() {
+        engine.set_tuning(semitones);
+    }
+}
+#[no_mangle]
+pub extern "C" fn rebit_mixer_new() -> *mut LayerMixer {
+    Box::into_raw(Box::default())
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_free(mixer: *mut LayerMixer) {
+    if !mixer.is_null() {
+        drop(Box::from_raw(mixer));
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_prepare(mixer: *mut LayerMixer, rate: f64) {
+    if let Some(m) = mixer.as_mut() {
+        m.prepare(rate);
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_reset(mixer: *mut LayerMixer) {
+    if let Some(m) = mixer.as_mut() {
+        m.reset();
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_parameters(
+    mixer: *mut LayerMixer,
+    layer: usize,
+    settings: *const LayerMix,
+) {
+    if let (Some(m), Some(s)) = (mixer.as_mut(), settings.as_ref()) {
+        m.set_mix(layer, *s);
+    }
+}
+/// Engines and output buffers must be distinct and exclusively audio-owned.
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_render(
+    mixer: *mut LayerMixer,
+    first: *mut Engine,
+    second: *mut Engine,
+    left: *mut f32,
+    right: *mut f32,
+    count: usize,
+) {
+    if count == 0 || left.is_null() || left == right || first == second {
+        return;
+    }
+    if let (Some(m), Some(a), Some(b)) = (mixer.as_mut(), first.as_mut(), second.as_mut()) {
+        if right.is_null() {
+            m.render_mono(a, b, slice::from_raw_parts_mut(left, count));
+        } else {
+            m.render(
+                a,
+                b,
+                slice::from_raw_parts_mut(left, count),
+                slice::from_raw_parts_mut(right, count),
+            );
+        }
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_playback(
+    mixer: *const LayerMixer,
+    first: *const Engine,
+    second: *const Engine,
+    info: *mut crate::PlaybackInfo,
+) {
+    if let Some(info) = info.as_mut() {
+        *info = match (mixer.as_ref(), first.as_ref(), second.as_ref()) {
+            (Some(m), Some(a), Some(b)) => m.playback(a, b),
+            _ => crate::PlaybackInfo::default(),
+        };
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn rebit_mixer_layer_playback(
+    mixer: *const LayerMixer,
+    layer: usize,
+    engine: *const Engine,
+    info: *mut crate::PlaybackInfo,
+) {
+    if let Some(info) = info.as_mut() {
+        *info = match (mixer.as_ref(), engine.as_ref()) {
+            (Some(m), Some(e)) => m.layer_playback(layer, e),
+            _ => crate::PlaybackInfo::default(),
+        };
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn rebit_engine_new() -> *mut Engine {
@@ -51,6 +149,19 @@ pub unsafe extern "C" fn rebit_engine_render(engine: *mut Engine, output: *mut f
     }
     if let Some(e) = engine.as_mut() {
         e.render(slice::from_raw_parts_mut(output, count));
+    }
+}
+/// Audio-thread only. UI reads a native atomic copy, never this engine pointer.
+#[no_mangle]
+pub unsafe extern "C" fn rebit_engine_playback(
+    engine: *const Engine,
+    info: *mut crate::engine::PlaybackInfo,
+) {
+    if let Some(info) = info.as_mut() {
+        *info = engine.as_ref().map_or(
+            crate::engine::PlaybackInfo::default(),
+            Engine::playback_info,
+        );
     }
 }
 #[no_mangle]
@@ -197,6 +308,75 @@ pub unsafe extern "C" fn rebit_engine_clock_status(engine: *const Engine) -> i32
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layer_ffi_layout_stereo_mono_and_alias_guards() {
+        assert_eq!(std::mem::size_of::<LayerMix>(), 12);
+        assert_eq!(std::mem::align_of::<LayerMix>(), 4);
+        let mut a = Engine::new(8000., 1);
+        let mut b = Engine::new(8000., 2);
+        let mut mixer = LayerMixer::default();
+        mixer.prepare(8000.);
+        a.midi(0x90, 0, 127);
+        let mut left = [7.; 8];
+        let mut right = [7.; 8];
+        unsafe {
+            let first = &mut a as *mut Engine;
+            rebit_mixer_render(
+                &mut mixer,
+                first,
+                first,
+                left.as_mut_ptr(),
+                right.as_mut_ptr(),
+                8,
+            );
+            assert_eq!(left, [7.; 8]);
+            rebit_mixer_parameters(
+                &mut mixer,
+                0,
+                &LayerMix {
+                    pan: -1.,
+                    ..LayerMix::default()
+                },
+            );
+            rebit_mixer_render(
+                &mut mixer,
+                &mut a,
+                &mut b,
+                left.as_mut_ptr(),
+                right.as_mut_ptr(),
+                8,
+            );
+            assert_eq!(left, [-0.5; 8]);
+            assert_eq!(right, [0.; 8]);
+            rebit_mixer_render(
+                &mut mixer,
+                &mut a,
+                &mut b,
+                left.as_mut_ptr(),
+                ptr::null_mut(),
+                8,
+            );
+            assert_eq!(left, [-0.25; 8]);
+            rebit_mixer_free(ptr::null_mut());
+            rebit_engine_tuning(ptr::null_mut(), 0.);
+        }
+    }
+    #[test]
+    fn playback_snapshot_layout_and_null_boundary() {
+        assert_eq!(std::mem::size_of::<crate::PlaybackInfo>(), 28);
+        assert_eq!(std::mem::align_of::<crate::PlaybackInfo>(), 4);
+        let mut engine = Engine::default();
+        engine.midi(0x90, 60, 127);
+        engine.render(&mut [0.; 16]);
+        let mut snapshot = crate::PlaybackInfo::default();
+        unsafe {
+            rebit_engine_playback(&engine, &mut snapshot);
+            assert_eq!(snapshot, engine.playback_info());
+            rebit_engine_playback(&engine, ptr::null_mut());
+            rebit_engine_playback(ptr::null(), &mut snapshot);
+            assert_eq!(snapshot, crate::PlaybackInfo::default());
+        }
+    }
     #[test]
     fn swapping_a_live_bank_preserves_cursor_and_returns_retired_ownership() {
         let mut engine = Engine::new(48000., 1);

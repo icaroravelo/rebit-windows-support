@@ -17,15 +17,91 @@ The editor uses a game-console-inspired dark chassis, an original vector pixel
 wordmark, lime/cyan accents, glowing waveform and ADSR previews, stepped rotary
 rings, and a custom keyboard with octave scrolling. All artwork and glow effects
 are drawn with JUCE paths and gradients; no image assets or external fonts are
-required. Waveform and envelope displays are parameter previews, not audio meters.
+required. Waveform and envelope displays are parameter previews. The OUTPUT
+meter and voice tiles show actual processed playback.
 
 Knob values remain editable, and double-click resets a knob to its default.
 The independent arpeggiator works at every voice count. The MONO tab holds the
 legacy one-voice modes; glide is available there with Arp off. Colours
 separate oscillator, amplitude, performance, modulation, and sequence controls.
 
-See `preview.png` for the default patch and `preview-showcase.png` for a populated
-patch rendered from the actual editor. The showcase does not change defaults.
+See `preview.png` for the default patch, `preview-showcase.png` for a populated
+patch, `preview-layer-b.png` for B's controls, and `preview-clipping.png` for
+output above full scale with a releasing voice. All are rendered from the actual editor and audio processor; preview
+patches do not change defaults.
+
+### Two sound layers
+
+Turn **B on** in SOUND LAYERS to add the second sound. **EDIT A / EDIT B** select
+which layer the oscillator, ADSR, pitch units and three sequence lanes edit.
+Selecting a layer does not change which layers you hear. Each layer has its own
+**LAYER LEVEL**, **PAN**, **TRANSPOSE** (-24..+24 semitones), and **DETUNE**
+(-100..+100 cents). Tuning does not change the MIDI key identity or note-off.
+
+A starts on with its previous pulse sound, unity layer level and centered pan.
+B starts off, with a triangle oscillator, -12 semitones and 0.50 layer level.
+For a sub bass, turn B on and leave it one octave down. For a wide lead, tune
+both to the same octave, detune one slightly and pan them apart. Noise and
+melodic layers can use different envelopes and volume/pitch/duty patterns.
+
+**MASTER**, Voices, MIDI/pedals, mono/glide, arpeggiator, modulation and FRAME
+CLOCK are shared. Voices limits each layer separately: 8 allows eight voices
+in A and eight in B. Each voice has one oscillator and its own envelope/sequence
+cursors. There are at most 128 regular voices plus 128 short removal fades.
+
+Layer levels, balance and switches fade over 5 ms during playback; tuning edits
+use the existing short pitch ramp. Pan uses linear balance: center is unity in
+both channels, hard left/right silences the opposite channel. Mono output is the
+average of stereo. Layer A continues its performance while muted. Disabling B
+stops its synthesis after the fade; enabling it restarts its own envelopes and
+sequences from currently held/pedal-retained notes or the current arp step.
+Expired release tails and discarded pedal-only voices are not recreated.
+
+The editor is now 1320x930, with the layer controls in a side panel. Invalid
+sequence drafts must be corrected before switching layers. Each layer's bank
+and playhead stay separate; editing B does not change A's sequence text.
+
+New patches use state **version 2**. Version-1 Rust patches load into A with
+unity layer level, center pan and zero added tuning; B is explicitly disabled
+and cleared. Existing parameter IDs and plugin identity are retained. New states
+need this build or later; earlier builds reject version 2.
+
+An offline stereo example is `dist/rebit-rust-layers-demo.wav`. Reproduce it with:
+
+```
+cargo run --release --offline --locked --bin rebit-render -- layers.wav pulse --layers
+```
+
+B skips oscillator rendering while off; A remains the shared performance source
+even when muted. Both engines and the mixer are preallocated. For a reproducible
+offline processing-cost check, use `cargo run --release --offline --locked
+--example layer_budget`; local results and limits are recorded in VALIDATION.md.
+
+### Playback feedback
+
+The top-right **OUTPUT** meter measures the larger absolute stereo sample after
+both layers' levels, pans and MASTER, before the DAW's fader or downstream effects. It shows sample peaks in
+dBFS, from -60 to +6 dB on the bar, with instantaneous attack and 24 dB/second
+falloff. The white marker and numeric value hold the peak for one second before
+falling. Silence reads **-INF dBFS**. This is a sample-peak meter, not a true-peak
+or loudness meter.
+
+**CLIP** latches red when any output sample reaches 0 dBFS or higher. Click it
+to clear; further overload lights it again. Reduce MASTER or layer levels to
+make room. The floating-point output is not limited or altered by the meter.
+Clip history survives closing the editor and STOP; preparation clears it.
+
+Below the waveform, **A / B** report each layer's regular voices versus the Voices
+setting. Each row has 64 tiles: mint held/pedal voices for A, violet for B, and
+amber release stages. **+FADE** counts the brief extra continuations from voice removal
+or stealing. A silent enabled volume sequence may still have an active voice;
+the output meter reflects the resulting silence. **KEYS HELD** refers to input
+keys, so a latched arpeggio can keep playing with **NO KEYS HELD**.
+
+The display refreshes at 30 Hz. When callbacks stop, meter/activity clear after
+at least 250 ms (or three buffer durations for long buffers) and show **AUDIO
+IDLE**; the clip latch remains available. Engine ballistics advance in audio
+samples and remain independent of processing-buffer size.
 
 ## Run it
 
@@ -79,7 +155,8 @@ Use a lower gain when stacking many voices.
 ## Instrument
 
 - Pulse (12.5%, 25%, 50%), stepped triangle, 4-bit random, and long/short LFSR noise.
-- 1–64 voices, velocity, ADSR, per-channel pitch bend and mod wheel.
+- Two independently tuned/panned oscillator layers; 1–64 voices and ADSR per layer.
+- Velocity, per-channel pitch bend and mod wheel.
 - Mono legato with glide and return to the previous held note; retrigger mode;
   legacy ascending/descending arpeggios with frame, tempo, or seconds clocks.
 - Independent arpeggiator: five patterns, 1–4 octaves, gate, swing, latch,
@@ -90,11 +167,37 @@ Use a lower gain when stacking many voices.
 - Volume, pitch, and pulse-duty sequences, compiled outside audio processing.
 - Host automation and versioned state saving/recall.
 
-Select **1 voice** with **Arp off** for the legacy mono/glide modes. Changing
-voice count or mono behavior in that legacy mode resets held-key tracking.
-With the independent arp on, the held chord survives those changes; reducing
-voice count can cut release tails. Pitch is capped below Nyquist for extreme
+Select **1 voice** with **Arp off** for the legacy mono/glide modes. Voice-count
+and mono-mode changes retain physically held keys and controller state. With
+the independent arp on, the held chord and current generated note survive those
+changes. Pitch is capped below Nyquist for extreme
 notes/modulation; this lo-fi oscillator implementation is not bandlimited.
+
+### Live changes
+
+Gain and held-note sustain edits ramp over **5 ms**. Waveform, manual pulse width,
+and noise-type changes crossfade over the same interval without restarting
+oscillator phase, envelopes, or sequences. Pitch bend and live pitch/modulation
+settings use a short tuning ramp. Changing attack/decay or switching the volume
+lane blends from the current amplitude; changing release during a tail recalculates
+its remaining slope, with a 3 ms minimum when turning release down to zero.
+Changes made while silent take effect immediately for the next note.
+
+Reducing Voices keeps the newest held notes, with the latest physical key chosen
+for mono. Kept voices retain their envelope and sequence progress. Raising Voices
+restores other physically held keys, newest first, with a **3 ms** fade-in; these
+restored voices start fresh envelopes/sequences. Pedal-only notes that lost their
+voice are not restored. The retained voices keep sustain/sostenuto and channel
+controllers. Independent-arp voice-count changes keep its clock and current note.
+
+Removed or stolen sounding voices get a **3 ms** oscillator fade-out. Up to 64
+short continuations per layer can exist beyond the selected Voices count; if full, the
+quietest continuation is replaced. These transitions reduce edit/steal clicks;
+the raw chip oscillators still contain deliberate sharp edges. Normal note
+attacks, zero-release note-offs, arp gates, and sequence-frame steps keep their
+timing. STOP, All Sound Off, and a host-synced arp stop silence applicable tails
+immediately. Host parameter changes are observed at processing-block boundaries;
+the ramps themselves run per sample and do not depend on buffer size.
 
 ## Independent arpeggiator
 
@@ -130,8 +233,9 @@ Random state is local and deterministic, independent of other plugin instances.
 
 The **MONO** tab retains the old parameter IDs and modes for earlier patches.
 Its legacy arp is overridden when the independent **Arp on** switch is enabled.
-Older version-1 patches load with the independent arp off and its new settings at
-defaults. New settings are saved with normal host state; plugin identity is unchanged.
+Version-1 patches from before the independent arp load with it off and its new
+settings at defaults. Later version-1 arp settings are preserved. New settings
+are saved with normal host state; plugin identity is unchanged.
 The arp generates internal synth notes, not MIDI output to other instruments.
 
 ### Host transport synchronization
@@ -156,7 +260,7 @@ behavior. Turn it on explicitly in an existing Logic patch to use transport sync
   are sampled once per callback and extrapolated within it. Tempo ramps are
   followed at that resolution, rather than claiming sample-accurate tempo events.
 
-**FRAME CLOCK** selects 60 Hz or a musical duration for all three sequence lanes.
+**FRAME CLOCK** selects 60 Hz or a musical duration for both layers' sequence lanes.
 60 Hz keeps the previous note-relative behavior. Musical frames can be quarter,
 eighth, sixteenth, 32nd or 64th notes, or eighth/sixteenth triplets. They use the
 host grid when Host sync is on and the host is playing; otherwise they use the
@@ -177,7 +281,7 @@ cargo run --release --offline --locked --bin rebit-render -- arp.wav pulse --arp
 
 ## Sequences
 
-Select the **VOLUME**, **PITCH**, or **DUTY** tab and draw in the grid. Drawing
+Select **EDIT A / EDIT B**, then the **VOLUME**, **PITCH**, or **DUTY** tab and draw in the grid. Drawing
 creates a 16-step pattern if the lane is empty and enables that lane. Edits are
 heard during playback; the current frame is retained where it remains valid.
 The three switches above the grid enable/disable lanes independently of the tab.
@@ -199,7 +303,7 @@ The three switches above the grid enable/disable lanes independently of the tab.
 The **TEXT** field stays available for the selected lane. Press Return, leave
 the field, or click **APPLY TEXT**. Invalid text retains the last compiled pattern.
 Graphical edits update the text; text edits update the graph. Markers are encoded
-in the same version-1 patch text, so saved patches remain compatible.
+in the existing sequence text grammar; version-2 state stores both banks.
 
 Values advance at **FRAME CLOCK**, 60 Hz by default. Examples:
 
@@ -222,7 +326,8 @@ expanded frames. Invalid edits keep the last valid sequence.
 The grammar deliberately rejects malformed legacy forms, ignored trailing text,
 empty release tails, zero/negative repeats, and overflowing integers. Original
 Rebit/Magical8bitPlug2 presets and DAW states are not imported. Rust patches use
-`RebitRust` version 1 state and cannot overwrite an original plugin instance.
+`RebitRust` version 2 state, with version-1 migration, and cannot overwrite an
+original plugin instance.
 
 ## Changes from the C++ edition
 
@@ -250,6 +355,9 @@ Sound and timing intentionally differ from the reverse-engineered edition.
 - `src/engine.rs`: safe Rust, fixed voice/key storage; no render/MIDI allocation.
 - `src/arpeggiator.rs`: fixed-storage chord handling, patterns, gate/swing clock.
 - `src/transport.rs`: validated host timing and musical frame clock definitions.
+- `src/smoothing.rs`: sample-counted ramps and three-way oscillator crossfades.
+- `src/meter.rs`: output sample peaks, peak hold/decay, and clip-event revision.
+- `src/layers.rs`: preallocated two-engine stereo mixer, layer fades and output metering.
 - `src/sequence.rs`: strict bounded compiler and sequence cursor.
 - `src/ffi.rs`: the Rust library's unsafe boundary, opaque C handles.
 - `native/RustEngine.h`: matching C ABI, no Rust structs with unstable layout.
@@ -258,10 +366,11 @@ Sound and timing intentionally differ from the reverse-engineered edition.
 - `native/SequenceCanvas.*`: graphical sequence editing and atomic playhead display.
 - `tests/`: Rust regressions, native processor integration, VST3 host, editor preview.
 
-After preparation, only the audio thread accesses the engine. The control thread
-owns the canonical sequence bank under `textMutex`. It publishes a cloned bank
-under `sequenceLock`. The audio callback uses a try-lock to swap that bank with
-its current bank and leaves the retired bank for control-thread reclamation.
+After preparation, only the audio thread accesses the two engines and mixer.
+The control thread owns both canonical sequence banks under `textMutex`. It
+publishes cloned banks under `sequenceLock`. The audio callback uses a try-lock
+to swap each publication with its engine's bank, leaving retired banks for
+control-thread reclamation. State recall publishes both banks under one lock.
 Parsing, cloning, and freeing banks never happen in the callback. Processor
 teardown requires the host to stop callbacks first. Hosts must call state
 serialization/restoration outside realtime processing; these operations allocate.

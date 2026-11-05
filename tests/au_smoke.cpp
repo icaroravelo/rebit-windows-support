@@ -67,6 +67,22 @@ int main(int argc,char** argv){
         check(MusicDeviceMIDIEvent(unit,0x90,69,127,0),"Restored note on");
         time.mSampleTime=256;flags=0;check(AudioUnitRender(unit,&flags,&time,0,128,buffers),"Restored note render");
         if(std::abs(left[0]+0.5f)>1e-7f)throw std::runtime_error("State restore changed sound");
+        setNamedNormalized(unit,"Gain",0.f);
+        time.mSampleTime=384;flags=0;check(AudioUnitRender(unit,&flags,&time,0,128,buffers),"Render live gain fade");
+        if(std::abs(left[0])<.49f||std::abs(std::abs(left[127])-(.5f*(1.f-128.f/240.f)))>1e-6f)
+            throw std::runtime_error("AU gain automation did not ramp");
+        time.mSampleTime=512;flags=0;check(AudioUnitRender(unit,&flags,&time,0,128,buffers),"Finish live gain fade");
+        for(int i=111;i<128;++i)if(left[i]!=0.f)throw std::runtime_error("AU gain fade did not settle in five ms");
+        setNamedNormalized(unit,"Gain",.5f);
+        check(MusicDeviceMIDIEvent(unit,0xb0,120,0,0),"Clear before layer test");
+        time.mSampleTime=640;flags=0;check(AudioUnitRender(unit,&flags,&time,0,128,buffers),"Clear render");
+        time.mSampleTime=768;flags=0;check(AudioUnitRender(unit,&flags,&time,0,128,buffers),"Settle gain before layer test");
+        setNamedNormalized(unit,"Layer B enabled",1);setNamedNormalized(unit,"Layer B level",1);
+        setNamedNormalized(unit,"Layer A pan",0);setNamedNormalized(unit,"Layer B pan",1);setNamedNormalized(unit,"Layer B transpose",.5f);
+        check(MusicDeviceMIDIEvent(unit,0x90,0,127,0),"Layer note on");
+        time.mSampleTime=896;flags=0;check(AudioUnitRender(unit,&flags,&time,0,128,buffers),"Layer stereo render");
+        if(std::abs(left[0]+.5f)>1e-6f||std::abs(right[0]+8.f/15.f)>1e-6f)throw std::runtime_error("AU layer stereo routing differs");
+        setNamedNormalized(unit,"Layer B enabled",0);setNamedNormalized(unit,"Layer A pan",.5f);
         check(AudioUnitUninitialize(unit),"Uninitialize before timing checks");
         format.mSampleRate=8000;maxFrames=2400;
         check(AudioUnitSetProperty(unit,kAudioUnitProperty_StreamFormat,kAudioUnitScope_Output,0,&format,sizeof(format)),"Timing stream format");

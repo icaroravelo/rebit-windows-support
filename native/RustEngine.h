@@ -4,6 +4,9 @@
 #include <type_traits>
 struct RustEngine;
 struct RustSequenceBank;
+struct RustLayerMixer;
+struct RustLayerMix { int32_t enabled; float gain,pan; };
+static_assert(sizeof(RustLayerMix)==12 && std::is_standard_layout_v<RustLayerMix>);
 struct RustParameters {
     int32_t osc, duty, noise_algorithm, max_poly, behavior, interval_type, pitch_mode;
     float gain, attack, decay, sustain, release, portamento, bend_range, vibrato_period,
@@ -23,8 +26,24 @@ struct RustTransportInfo {
 };
 static_assert(sizeof(RustClockParameters)==8 && sizeof(RustTransportInfo)==48);
 struct RustSequenceInfo { size_t count; int32_t loop_start, release_start; };
+struct RustPlaybackInfo {
+    float peak,held_peak;
+    uint32_t clips,active,held,released,fading;
+};
+static_assert(sizeof(RustPlaybackInfo)==28 && std::is_standard_layout_v<RustPlaybackInfo>);
 extern "C" {
 RustEngine* rebit_engine_new();
+RustEngine* rebit_engine_new_seeded(uint32_t);
+void rebit_engine_tuning(RustEngine*,double);
+RustLayerMixer* rebit_mixer_new();
+void rebit_mixer_free(RustLayerMixer*);
+void rebit_mixer_prepare(RustLayerMixer*,double);
+void rebit_mixer_reset(RustLayerMixer*);
+void rebit_mixer_parameters(RustLayerMixer*,size_t,const RustLayerMix*);
+// Distinct engines/output buffers; right==nullptr selects an averaged mono mix.
+void rebit_mixer_render(RustLayerMixer*,RustEngine*,RustEngine*,float* left,float* right,size_t);
+void rebit_mixer_playback(const RustLayerMixer*,const RustEngine*,const RustEngine*,RustPlaybackInfo*);
+void rebit_mixer_layer_playback(const RustLayerMixer*,size_t,const RustEngine*,RustPlaybackInfo*);
 void rebit_engine_free(RustEngine*);
 void rebit_engine_prepare(RustEngine*, double);
 void rebit_engine_reset(RustEngine*);
@@ -35,6 +54,7 @@ int32_t rebit_engine_clock_status(const RustEngine*);
 void rebit_engine_parameters(RustEngine*, const RustParameters*, double);
 void rebit_engine_midi(RustEngine*, uint8_t, uint8_t, uint8_t);
 void rebit_engine_render(RustEngine*, float*, size_t);
+void rebit_engine_playback(const RustEngine*, RustPlaybackInfo*);
 RustSequenceBank* rebit_bank_new();
 RustSequenceBank* rebit_bank_clone(const RustSequenceBank*);
 void rebit_bank_free(RustSequenceBank*);

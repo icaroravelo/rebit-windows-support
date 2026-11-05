@@ -7,12 +7,17 @@ int main(int argc,char** argv) {
     auto processor=std::make_unique<RebitProcessor>();
     // Optional display state for visual QA; plugin defaults and saved patches
     // are unaffected. Every displayed control still uses its real attachment.
-    if(argc>2 && juce::String(argv[2])=="--showcase") {
+    const bool dual=argc>2&&(juce::String(argv[2])=="--showcase"||juce::String(argv[2])=="--layer-b");
+    if(dual) {
         auto set=[&](const char* id,float value){if(auto* p=processor->state.getParameter(id))p->setValueNotifyingHost(p->convertTo0to1(value));};
         host.set(0.,120.,true);processor->setPlayHead(&host);set("hostSync",1);set("sequenceClock",4);
         set("arpEnabled",1);set("arpPattern",2);set("arpOctaves",1);set("arpSwing",18);set("arpGate",75);
         set("maxPoly",8);set("attack",.015f);set("decay",.25f);set("suslevel",.65f);set("release",.35f);
         set("duty",1);set("portamentoTime",.08f);set("vibratoDepth",.35f);set("sweepInitialPitch",7);set("sweepTime",.16f);
+        set("layerBEnabled",1);set("layerAGain",.8f);set("layerBGain",.45f);set("layerAPan",-.25f);set("layerBPan",.35f);
+        set("layerBDetune",-7);set("layerBAttack",.025f);set("layerBDecay",.18f);set("layerBSustain",.75f);set("layerBRelease",.4f);
+        processor->setSequenceText(0,"15[12,9,12]|6,3,0",1);processor->setSequenceText(1,"[0,-12,0,7]|0",1);
+        set("layerBVolumeEnabled",1);set("layerBPitchEnabled",1);
         processor->setSequenceText(0,"15,12,9[7,5]|3,1,0");
         processor->setSequenceText(1,"0,4,7[12,7,4]|0");
         processor->setSequenceText(2,"0,1[2,1]|0");
@@ -23,7 +28,15 @@ int main(int argc,char** argv) {
         midi.addEvent(juce::MidiMessage::noteOn(1,67,(juce::uint8)100),0);
         for(int block=0;block<32;++block){host.set((double)block*128./24000.,120.,true);processor->processBlock(audio,midi);}
     }
+    if(argc>2 && juce::String(argv[2])=="--clip") {
+        auto* release=processor->state.getParameter("release");release->setValueNotifyingHost(release->convertTo0to1(.2f));
+        processor->prepareToPlay(8000,64);juce::AudioBuffer<float> audio(2,64);juce::MidiBuffer midi;
+        for(int note:{0,1,2})midi.addEvent(juce::MidiMessage::noteOn(1,note,(juce::uint8)127),0);
+        midi.addEvent(juce::MidiMessage::noteOff(1,0),32);processor->processBlock(audio,midi);
+    }
     auto editor=std::unique_ptr<juce::AudioProcessorEditor>(processor->createEditor());
+    if(argc>2&&juce::String(argv[2])=="--layer-b")for(auto* child:editor->getChildren())
+        if(child->getName()=="Edit layer B")if(auto* button=dynamic_cast<juce::TextButton*>(child))button->onClick();
     editor->setVisible(true);
     auto image=editor->createComponentSnapshot(editor->getLocalBounds(),true,1.5f);
     juce::File output(argc>1?argv[1]:"/tmp/rebit-preview.png");

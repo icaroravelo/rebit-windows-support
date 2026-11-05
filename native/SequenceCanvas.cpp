@@ -73,6 +73,9 @@ void SequenceCanvas::selectLane(int lane){
     commit();selectedLane=juce::jlimit(0,2,lane);page=0;selectedStep=0;observedRevision=~uint64_t{};refresh();
     if(onLaneChanged)onLaneChanged(selectedLane);
 }
+void SequenceCanvas::selectLayer(int layer){
+    commit();selectedLayer=juce::jlimit(0,1,layer);page=0;selectedStep=0;playhead=-1;observedRevision=~uint64_t{};refresh();
+}
 void SequenceCanvas::resizePattern(){
     if(length.getText().isEmpty()){controls();return;}
     const int count=juce::jlimit(0,maxFrames,length.getText().getIntValue());
@@ -87,26 +90,26 @@ void SequenceCanvas::resizePattern(){
 }
 void SequenceCanvas::commit(){
     if(!dirty)return;
-    const auto error=processor.setSequenceText(selectedLane,SequenceSnapshot::toText(data));
+    const auto error=processor.setSequenceText(selectedLane,SequenceSnapshot::toText(data),selectedLayer);
     if(error.isNotEmpty())return;
-    dirty=false;data=processor.sequenceData(selectedLane);observedRevision=data.revision;
+    dirty=false;data=processor.sequenceData(selectedLane,selectedLayer);observedRevision=data.revision;
     // Drawing is a deliberate instruction to hear this lane.
     const char* ids[]={"isVolumeSequenceEnabled_raw","isPitchSequenceEnabled_raw","isDutySequenceEnabled_raw"};
-    if(!data.values.empty())if(auto* p=processor.state.getParameter(ids[selectedLane])){
+    if(!data.values.empty())if(auto* p=processor.state.getParameter(RebitProcessor::layerParameter(ids[selectedLane],selectedLayer))){
         if(p->getValue()<.5f){p->beginChangeGesture();p->setValueNotifyingHost(1.f);p->endChangeGesture();}
     }
     controls();repaint();if(onCommitted)onCommitted(selectedLane);
 }
 void SequenceCanvas::refresh(){
-    if(processor.sequenceRevision()!=observedRevision&&!dirty&&!drawing&&dragMarker==0){
-        data=processor.sequenceData(selectedLane);observedRevision=data.revision;
+    if(processor.sequenceRevision(selectedLayer)!=observedRevision&&!dirty&&!drawing&&dragMarker==0){
+        data=processor.sequenceData(selectedLane,selectedLayer);observedRevision=data.revision;
         if(selectedLane==1){
             int extent=0;for(auto v:data.values)extent=juce::jmax(extent,std::abs((int)v));
             if(extent>pitchRange)pitchRange=extent>24?64:24;
         }
         selectedStep=juce::jlimit(0,juce::jmax(0,(int)data.values.size()-1),selectedStep);controls();repaint();
     }
-    const int position=processor.sequencePosition(selectedLane);
+    const int position=processor.sequencePosition(selectedLane,selectedLayer);
     if(position!=playhead){playhead=position;repaint();}
 }
 void SequenceCanvas::timerCallback(){commit();refresh();}

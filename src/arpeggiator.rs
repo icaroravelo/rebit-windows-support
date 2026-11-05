@@ -88,6 +88,7 @@ struct Candidate {
     note: ArpNote,
     rank: (u64, u64, usize),
 }
+#[derive(Clone)]
 pub struct Arpeggiator {
     pub parameters: ArpParameters,
     keys: [Key; 2048],

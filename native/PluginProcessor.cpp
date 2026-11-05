@@ -30,16 +30,45 @@ juce::AudioProcessorValueTreeState::ParameterLayout RebitProcessor::layout() {
     number("arpGate","Arp gate",5,100,65,1.f,1.f);number("arpSwing","Arp swing",0,49,0,1.f,1.f);
     boolean("hostSync","Host sync",true);
     choice("sequenceClock","Sequence clock",{"60 Hz","1/4","1/8","1/16","1/32","1/64","1/8 triplet","1/16 triplet"});
+    boolean("layerAEnabled","Layer A enabled",true);boolean("layerBEnabled","Layer B enabled");
+    number("layerAGain","Layer A level",0,1,1,1,.01f);number("layerBGain","Layer B level",0,1,.5f,1,.01f);
+    number("layerAPan","Layer A pan",-1,1,0,1,.01f);number("layerBPan","Layer B pan",-1,1,0,1,.01f);
+    number("layerATranspose","Layer A transpose",-24,24,0,1,1);number("layerBTranspose","Layer B transpose",-24,24,-12,1,1);
+    number("layerADetune","Layer A detune",-100,100,0,1,1);number("layerBDetune","Layer B detune",-100,100,0,1,1);
+    choice("layerBOsc","Layer B waveform",{"Pulse/Square","Triangle","Noise"},1);
+    choice("layerBDuty","Layer B duty",{"12.5%","25%","50%"});
+    choice("layerBNoise","Layer B noise",{"4-bit random","1-bit long cycle","1-bit short cycle"});
+    number("layerBAttack","Layer B attack",0,5,0,.5f,.001f);number("layerBDecay","Layer B decay",0,5,0,.5f,.001f);
+    number("layerBSustain","Layer B sustain",0,1,1,1,.01f);number("layerBRelease","Layer B release",0,5,0,.5f,.001f);
+    boolean("layerBVolumeEnabled","Layer B volume sequence");boolean("layerBPitchEnabled","Layer B pitch sequence");boolean("layerBDutyEnabled","Layer B duty sequence");
+    choice("layerBPitchMode","Layer B pitch units",{"Coarse","Fine"});
     return l;
 }
 RebitProcessor::RebitProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output",juce::AudioChannelSet::stereo(),true)),
-      state(*this,nullptr,"RebitRustParams",layout()), engine(rebit_engine_new()), canonical(rebit_bank_new()) {}
+      state(*this,nullptr,"RebitRustParams",layout()), engines{{rebit_engine_new(),rebit_engine_new_seeded(0xcc7530ed)}}, mixer(rebit_mixer_new()), canonical{{rebit_bank_new(),rebit_bank_new()}} {
+    parameterValues.reserve((size_t)getParameters().size());
+    for(auto* parameter:getParameters())if(auto* identified=dynamic_cast<juce::AudioProcessorParameterWithID*>(parameter))
+        parameterValues.emplace(identified->paramID.toRawUTF8(),state.getRawParameterValue(identified->paramID));
+}
 RebitProcessor::~RebitProcessor() {
     // Hosts stop processing before destruction. No callback owns these handles now.
-    rebit_engine_free(engine);rebit_bank_free(canonical);rebit_bank_free(pending);
+    for(size_t i=0;i<2;++i){rebit_engine_free(engines[i]);rebit_bank_free(canonical[i]);rebit_bank_free(pending[i]);}rebit_mixer_free(mixer);
 }
-float RebitProcessor::value(const char* id) const {auto* v=state.getRawParameterValue(id);return v?v->load():0;}
+const char* RebitProcessor::layerParameter(const char* id,int layer) {
+    if(layer==0)return id;
+    static constexpr std::pair<std::string_view,const char*> ids[]={
+        {"osc","layerBOsc"},{"duty","layerBDuty"},{"noiseAlgorithm_raw","layerBNoise"},
+        {"attack","layerBAttack"},{"decay","layerBDecay"},{"suslevel","layerBSustain"},{"release","layerBRelease"},
+        {"isVolumeSequenceEnabled_raw","layerBVolumeEnabled"},{"isPitchSequenceEnabled_raw","layerBPitchEnabled"},
+        {"isDutySequenceEnabled_raw","layerBDutyEnabled"},{"pitchSequenceMode_raw","layerBPitchMode"}};
+    for(const auto& entry:ids)if(entry.first==id)return entry.second;
+    return id;
+}
+float RebitProcessor::value(const char* id) const {
+    const auto found=parameterValues.find(id);
+    return found!=parameterValues.end()&&found->second?found->second->load(std::memory_order_relaxed):0.f;
+}
 void RebitProcessor::readParameters(bool readTransport) {
     RustParameters p{};
     p.osc=(int)value("osc");p.duty=(int)value("duty");p.noise_algorithm=(int)value("noiseAlgorithm_raw");p.max_poly=(int)value("maxPoly");p.behavior=(int)value("monophonicBehavior_raw");
@@ -60,27 +89,63 @@ void RebitProcessor::readParameters(bool readTransport) {
     arp.enabled=value("arpEnabled")>.5f;arp.pattern=(int)value("arpPattern");arp.rate=(int)value("arpRate");
     arp.octaves=(int)value("arpOctaves")+1;arp.latch=value("arpLatch")>.5f;arp.retrigger=1-(int)value("arpArticulation");
     arp.seconds=value("arpSeconds");arp.gate=value("arpGate")*.01f;arp.swing=value("arpSwing")*.01f;
-    rebit_engine_arp_parameters(engine,&arp);
-    rebit_engine_parameters(engine,&p,transport.bpm);
+    RustParameters b=p;
+    b.osc=(int)value("layerBOsc");b.duty=(int)value("layerBDuty");b.noise_algorithm=(int)value("layerBNoise");
+    b.attack=value("layerBAttack");b.decay=value("layerBDecay");b.sustain=value("layerBSustain");b.release=value("layerBRelease");
+    b.volume_enabled=value("layerBVolumeEnabled")>.5f;b.pitch_enabled=value("layerBPitchEnabled")>.5f;b.duty_enabled=value("layerBDutyEnabled")>.5f;b.pitch_mode=(int)value("layerBPitchMode");
     RustClockParameters clocks{value("hostSync")>.5f?1:0,(int)value("sequenceClock")};
-    rebit_engine_clock_parameters(engine,&clocks);
-    rebit_engine_transport(engine,&transport);
+    for(size_t layer=0;layer<2;++layer){
+        auto* engine=engines[layer];rebit_engine_arp_parameters(engine,&arp);
+        rebit_engine_parameters(engine,layer==0?&p:&b,transport.bpm);
+        rebit_engine_clock_parameters(engine,&clocks);rebit_engine_transport(engine,&transport);
+    }
+    rebit_engine_tuning(engines[0],value("layerATranspose")+value("layerADetune")*.01);
+    rebit_engine_tuning(engines[1],value("layerBTranspose")+value("layerBDetune")*.01);
+    const RustLayerMix mixA{value("layerAEnabled")>.5f?1:0,value("layerAGain"),value("layerAPan")};
+    const RustLayerMix mixB{value("layerBEnabled")>.5f?1:0,value("layerBGain"),value("layerBPan")};
+    rebit_mixer_parameters(mixer,0,&mixA);rebit_mixer_parameters(mixer,1,&mixB);
 }
-void RebitProcessor::prepareToPlay(double sr,int) {rebit_engine_prepare(engine,sr);readParameters(false);keyboard.reset();}
+void RebitProcessor::prepareToPlay(double sr,int) {
+    preparedSampleRate=std::isfinite(sr)?std::clamp(sr,8000.,384000.):44100.;
+    playbackIdleAfterMs.store(250,std::memory_order_relaxed);
+    for(auto* engine:engines)rebit_engine_prepare(engine,sr);rebit_mixer_prepare(mixer,sr);readParameters(false);keyboard.reset();publishPlayback();clearClip();
+}
+void RebitProcessor::publishPlayback() {
+    RustPlaybackInfo info{};rebit_mixer_playback(mixer,engines[0],engines[1],&info);
+    outputPeak.store(info.peak,std::memory_order_relaxed);outputHeldPeak.store(info.held_peak,std::memory_order_relaxed);
+    for(size_t layer=0;layer<2;++layer){
+        RustPlaybackInfo activity{};rebit_mixer_layer_playback(mixer,layer,engines[layer],&activity);
+        voiceActivity[layer].store(activity.active|(activity.held<<8)|(activity.released<<16)|(activity.fading<<24),std::memory_order_relaxed);
+    }
+    clipRevision.store(info.clips,std::memory_order_relaxed);
+    playbackRevision.fetch_add(1,std::memory_order_relaxed);
+}
+PlaybackSnapshot RebitProcessor::playbackInfo() const {
+    PlaybackSnapshot result;
+    result.peak=outputPeak.load(std::memory_order_relaxed);result.heldPeak=outputHeldPeak.load(std::memory_order_relaxed);
+    for(size_t layer=0;layer<2;++layer){
+        const auto activity=voiceActivity[layer].load(std::memory_order_relaxed);auto& part=result.layers[layer];
+        part.active=activity&255;part.held=(activity>>8)&255;part.released=(activity>>16)&255;part.fading=activity>>24;
+        result.active+=part.active;result.held+=part.held;result.released+=part.released;result.fading+=part.fading;
+    }
+    result.clipped=clipRevision.load(std::memory_order_relaxed)!=clipAcknowledged.load(std::memory_order_relaxed);
+    result.revision=playbackRevision.load(std::memory_order_relaxed);
+    result.idleAfterMs=playbackIdleAfterMs.load(std::memory_order_relaxed);return result;
+}
 bool RebitProcessor::isBusesLayoutSupported(const BusesLayout& l) const {return l.getMainInputChannelSet().isDisabled()&&(l.getMainOutputChannelSet()==juce::AudioChannelSet::mono()||l.getMainOutputChannelSet()==juce::AudioChannelSet::stereo());}
 void RebitProcessor::midi(const juce::MidiMessage& m) {
     const auto* data=m.getRawData();const int n=m.getRawDataSize();
-    if(n>0)rebit_engine_midi(engine,data[0],n>1?data[1]:0,n>2?data[2]:0);
+    if(n>0)for(auto* engine:engines)rebit_engine_midi(engine,data[0],n>1?data[1]:0,n>2?data[2]:0);
 }
 void RebitProcessor::processBlock(juce::AudioBuffer<float>& buffer,juce::MidiBuffer& messages) {
     juce::ScopedNoDenormals noDenormals;
-    if(resetRequested.exchange(false))rebit_engine_reset(engine);
+    playbackIdleAfterMs.store((uint32_t)std::max(250.,3000.*buffer.getNumSamples()/preparedSampleRate),std::memory_order_relaxed);
+    if(resetRequested.exchange(false)){for(auto* engine:engines)rebit_engine_reset(engine);rebit_mixer_reset(mixer);}
     readParameters();
     {
         const juce::SpinLock::ScopedTryLockType lock(sequenceLock);
-        if(lock.isLocked()&&sequenceDirty){
-            pending=rebit_engine_swap_bank(engine,pending);
-            sequenceDirty=false;
+        if(lock.isLocked())for(size_t layer=0;layer<2;++layer)if(sequenceDirty[layer]){
+            pending[layer]=rebit_engine_swap_bank(engines[layer],pending[layer]);sequenceDirty[layer]=false;
         }
     }
     keyboard.processNextMidiBuffer(messages,0,buffer.getNumSamples(),true);
@@ -91,15 +156,18 @@ void RebitProcessor::processBlock(juce::AudioBuffer<float>& buffer,juce::MidiBuf
         if(end<=at||buffer.getNumChannels()<=0)return;
         const int n=end-at;
         float* first=buffer.getWritePointer(0)+at;
-        rebit_engine_render(engine,first,(size_t)n);
-        for(int c=1;c<buffer.getNumChannels();++c)std::copy(first,first+n,buffer.getWritePointer(c)+at);
+        rebit_mixer_render(mixer,engines[0],engines[1],first,buffer.getNumChannels()>1?buffer.getWritePointer(1)+at:nullptr,(size_t)n);
         at=end;
     };
     for(const auto metadata:messages){render(metadata.samplePosition);midi(metadata.getMessage());}
     render(buffer.getNumSamples());messages.clear();
-    clockState.store(rebit_engine_clock_status(engine),std::memory_order_relaxed);
-    int32_t positions[3];rebit_engine_positions(engine,positions);
-    for(size_t lane=0;lane<3;++lane)playheads[lane].store(positions[lane],std::memory_order_relaxed);
+    publishPlayback();
+    clockState.store(rebit_engine_clock_status(engines[0]),std::memory_order_relaxed);
+    for(size_t layer=0;layer<2;++layer){
+        int32_t positions[3];rebit_engine_positions(engines[layer],positions);
+        if(voiceActivity[layer].load(std::memory_order_relaxed)==0)std::fill(std::begin(positions),std::end(positions),-1);
+        for(size_t lane=0;lane<3;++lane)playheads[layer*3+lane].store(positions[lane],std::memory_order_relaxed);
+    }
 }
 juce::String SequenceSnapshot::toText(const SequenceSnapshot& data) {
     if(data.values.empty())return {};
@@ -111,59 +179,50 @@ juce::String SequenceSnapshot::toText(const SequenceSnapshot& data) {
     if(data.releaseStart>=0&&data.releaseStart<count)text+="|"+join(data.releaseStart,count);
     return text;
 }
-SequenceSnapshot RebitProcessor::sequenceData(int lane) const {
-    SequenceSnapshot result;
-    if(lane<0||lane>=3)return result;
-    const juce::ScopedLock lock(textMutex);
-    RustSequenceInfo info{};
-    if(!rebit_bank_read(canonical,(size_t)lane,nullptr,0,&info))return result;
-    result.values.resize(info.count);
-    rebit_bank_read(canonical,(size_t)lane,result.values.data(),result.values.size(),&info);
-    result.loopStart=info.loop_start;result.releaseStart=info.release_start;result.revision=sequenceVersion.load();return result;
+SequenceSnapshot RebitProcessor::sequenceData(int lane,int layer) const {
+    SequenceSnapshot result;if(lane<0||lane>=3||layer<0||layer>=2)return result;
+    const juce::ScopedLock lock(textMutex);RustSequenceInfo info{};
+    if(!rebit_bank_read(canonical[(size_t)layer],(size_t)lane,nullptr,0,&info))return result;
+    result.values.resize(info.count);rebit_bank_read(canonical[(size_t)layer],(size_t)lane,result.values.data(),result.values.size(),&info);
+    result.loopStart=info.loop_start;result.releaseStart=info.release_start;result.revision=sequenceVersion[(size_t)layer].load();return result;
 }
-juce::String RebitProcessor::sequenceText(int i) const {const juce::ScopedLock lock(textMutex);return i>=0&&i<3?texts[(size_t)i]:juce::String{};}
-juce::String RebitProcessor::setSequenceText(int i,const juce::String& text) {
-    if(i<0||i>2)return "Unknown sequence";
-    const juce::ScopedLock textLock(textMutex);
-    auto* next=rebit_bank_clone(canonical);
-    uint8_t error[256]{};
-    const auto utf8=text.toUTF8();
-    if(!rebit_bank_set(next,(size_t)i,reinterpret_cast<const uint8_t*>(utf8.getAddress()),text.getNumBytesAsUTF8(),error,sizeof(error))){
+juce::String RebitProcessor::sequenceText(int lane,int layer) const {
+    const juce::ScopedLock lock(textMutex);return lane>=0&&lane<3&&layer>=0&&layer<2?texts[(size_t)layer][(size_t)lane]:juce::String{};
+}
+juce::String RebitProcessor::setSequenceText(int lane,const juce::String& text,int layer) {
+    if(lane<0||lane>=3||layer<0||layer>=2)return "Unknown sequence";
+    const auto index=(size_t)layer;const juce::ScopedLock textLock(textMutex);
+    auto* next=rebit_bank_clone(canonical[index]);uint8_t error[256]{};const auto utf8=text.toUTF8();
+    if(!rebit_bank_set(next,(size_t)lane,reinterpret_cast<const uint8_t*>(utf8.getAddress()),text.getNumBytesAsUTF8(),error,sizeof(error))){
         rebit_bank_free(next);return juce::String::fromUTF8(reinterpret_cast<const char*>(error));
     }
-    rebit_bank_free(canonical);canonical=next;
-    auto* publication=rebit_bank_clone(canonical);
-    {
-        const juce::SpinLock::ScopedLockType lock(sequenceLock);
-        std::swap(pending,publication);sequenceDirty=true;
-    }
-    // The old publication (or retired audio bank) is destroyed only here.
-    rebit_bank_free(publication);
-    texts[(size_t)i]=text;++sequenceVersion;
-    return {};
+    rebit_bank_free(canonical[index]);canonical[index]=next;auto* publication=rebit_bank_clone(canonical[index]);
+    {const juce::SpinLock::ScopedLockType lock(sequenceLock);std::swap(pending[index],publication);sequenceDirty[index]=true;}
+    rebit_bank_free(publication);texts[index][(size_t)lane]=text;++sequenceVersion[index];return {};
 }
 void RebitProcessor::getStateInformation(juce::MemoryBlock& out) {
-    const juce::ScopedLock lock(textMutex);
-    auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",1);
-    xml->addChildElement(state.copyState().createXml().release());
-    const char* names[]={"volume","pitch","duty"};
-    for(int i=0;i<3;++i)xml->createNewChildElement(names[i])->addTextElement(texts[(size_t)i]);
+    const juce::ScopedLock lock(textMutex);auto xml=std::make_unique<juce::XmlElement>("RebitRust");xml->setAttribute("version",2);
+    xml->addChildElement(state.copyState().createXml().release());const char* names[]={"volume","pitch","duty"};
+    for(size_t layer=0;layer<2;++layer){
+        auto* node=layer==0?xml.get():xml->createNewChildElement("layerB");
+        for(size_t lane=0;lane<3;++lane)node->createNewChildElement(names[lane])->addTextElement(texts[layer][lane]);
+    }
     copyXmlToBinary(*xml,out);
 }
 void RebitProcessor::setStateInformation(const void* data,int size) {
-    auto xml=getXmlFromBinary(data,size);
-    if(!xml||!xml->hasTagName("RebitRust")||xml->getIntAttribute("version")!=1)return;
-    auto* params=xml->getChildByName("RebitRustParams");
-    if(!params)return;
+    auto xml=getXmlFromBinary(data,size);if(!xml||!xml->hasTagName("RebitRust"))return;
+    const int version=xml->getIntAttribute("version");if(version!=1&&version!=2)return;
+    auto* params=xml->getChildByName("RebitRustParams");if(!params)return;
     const juce::ScopedLock textLock(textMutex);
-    auto* next=rebit_bank_new();
-    std::array<juce::String,3> restored;
+    std::array<RustSequenceBank*,2> next{{rebit_bank_new(),rebit_bank_new()}};
+    std::array<std::array<juce::String,3>,2> restored;
     const char* names[]={"volume","pitch","duty"};
-    for(size_t i=0;i<3;++i){
-        auto* child=xml->getChildByName(names[i]);restored[i]=child?child->getAllSubText():juce::String{};
-        const auto utf8=restored[i].toUTF8();uint8_t error[256]{};
-        if(!rebit_bank_set(next,i,reinterpret_cast<const uint8_t*>(utf8.getAddress()),restored[i].getNumBytesAsUTF8(),error,sizeof(error))){
-            rebit_bank_free(next);return;
+    for(size_t layer=0;layer<2;++layer)for(size_t lane=0;lane<3;++lane){
+        auto* node=layer==0?xml.get():version==2?xml->getChildByName("layerB"):nullptr;
+        auto* child=node?node->getChildByName(names[lane]):nullptr;restored[layer][lane]=child?child->getAllSubText():juce::String{};
+        const auto utf8=restored[layer][lane].toUTF8();uint8_t error[256]{};
+        if(!rebit_bank_set(next[layer],lane,reinterpret_cast<const uint8_t*>(utf8.getAddress()),restored[layer][lane].getNumBytesAsUTF8(),error,sizeof(error))){
+            for(auto* bank:next)rebit_bank_free(bank);return;
         }
     }
     auto parameterTree=juce::ValueTree::fromXml(*params);
@@ -183,15 +242,23 @@ void RebitProcessor::setStateInformation(const void* data,int size) {
     if(!parameterTree.getChildWithProperty("id","sequenceClock").isValid()){
         juce::ValueTree child("PARAM");child.setProperty("id","sequenceClock",nullptr);child.setProperty("value",0.f,nullptr);parameterTree.addChild(child,-1,nullptr);
     }
+    // Version-1 patches are single-layer. Never inherit current layer settings.
+    for(auto* parameter:getParameters())if(auto* p=dynamic_cast<juce::RangedAudioParameter*>(parameter))
+        if(p->paramID.startsWith("layer")){
+            auto child=parameterTree.getChildWithProperty("id",p->paramID);
+            if(version==1&&child.isValid()){parameterTree.removeChild(child,nullptr);child={};}
+            if(!child.isValid()){
+                juce::ValueTree defaults("PARAM");defaults.setProperty("id",p->paramID,nullptr);
+                defaults.setProperty("value",p->convertFrom0to1(p->getDefaultValue()),nullptr);parameterTree.addChild(defaults,-1,nullptr);
+            }
+        }
     state.replaceState(parameterTree);
-    rebit_bank_free(canonical);canonical=next;texts=restored;
-    auto* publication=rebit_bank_clone(canonical);
-    {
-        const juce::SpinLock::ScopedLockType lock(sequenceLock);
-        std::swap(pending,publication);sequenceDirty=true;
-    }
-    rebit_bank_free(publication);
-    ++sequenceVersion;resetRequested=true;
+    std::array<RustSequenceBank*,2> publication{};
+    for(size_t layer=0;layer<2;++layer){rebit_bank_free(canonical[layer]);canonical[layer]=next[layer];publication[layer]=rebit_bank_clone(canonical[layer]);}
+    texts=restored;
+    {const juce::SpinLock::ScopedLockType lock(sequenceLock);for(size_t layer=0;layer<2;++layer){std::swap(pending[layer],publication[layer]);sequenceDirty[layer]=true;}}
+    for(auto* bank:publication)rebit_bank_free(bank);
+    for(auto& revision:sequenceVersion)++revision;resetRequested=true;
 }
 juce::AudioProcessorEditor* RebitProcessor::createEditor(){return new RebitEditor(*this);}
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter(){return new RebitProcessor();}

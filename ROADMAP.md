@@ -17,18 +17,18 @@ parameter IDs, and version-1 patches; migrate state explicitly when needed.
 3. **Transport synchronization — completed and installed**
    - Align arpeggios and optional sequence clocks with Logic's beat position.
    - Handle start/stop, seek, loops, tempo changes, and free-running standalone.
-4. **Smoother live changes — next**
+4. **Smoother live changes — completed and installed**
    - Preserve held notes when voice count/mono mode changes where practical.
    - Smooth audible parameter jumps and define waveform-change transitions.
-5. **Playback feedback — planned**
+5. **Playback feedback — completed and installed**
    - Real output peak meter and clipping indication.
    - Voice activity and useful playback feedback alongside parameter previews.
    - Sequence playheads are included in milestone 1.
-6. **Two sound layers — planned**
+6. **Two sound layers — completed and installed**
    - Independent oscillator, tuning, gain/pan, envelope, and sequences.
    - Pulse + triangle sub, melodic + noise, detune and stereo combinations.
    - Voice/CPU budget and migration from single-layer patches.
-7. **Raw and Clean sound modes — planned**
+7. **Raw and Clean sound modes — next**
    - Preserve raw chip sound; offer reduced-aliasing oscillators.
    - Optional saturation, bit-depth and sample-rate reduction, with bypass.
    - Compare CPU and spectra; avoid an unmeasured performance claim.
@@ -73,3 +73,54 @@ default to Host sync, with standalone fallback. Restart Logic to load this build
 
 JUCE 8.0.12 is now pinned locally under `vendor/JUCE`; native builds no longer
 depend on the missing sibling project folder. Milestone 4 is next.
+
+## Milestone 4 delivery
+
+Completed 2026-11-05. Installed smoother live changes: 5 ms parameter/timbre
+transitions, held-key/controller preservation through voice-count and mono-mode
+changes, and bounded 3 ms fades for removed/stolen voices. Restored physical keys
+start fresh voices; retained voices preserve their progress. Independent-arp
+changes preserve the current note and clock. Normal MIDI gates and chip sequence
+steps keep their timing. Existing parameter IDs, defaults, ABI and patch schema
+are retained.
+
+63 Rust tests, all four CTest groups, and Clippy with warnings denied pass.
+The installed AU signature verifies, its executable matches the build, and
+Apple AU validation succeeds. The prior Rust AU is backed up. Restart Logic to
+load this build. Milestone 5, playback feedback, is next.
+
+## Milestone 5 delivery
+
+Completed 2026-11-05. Installed real output sample-peak metering, a resettable
+clip latch, and 64 voice-activity tiles. Held/pedal voices, releases and brief
+fade continuations are distinguished; the waveform and ADSR stay parameter
+previews. Meter hold/decay follow audio time, and the UI clears stale activity
+when the host suspends callbacks. Metering does not limit or modify output.
+
+70 Rust tests, all four CTest groups, and Clippy with warnings denied pass.
+Native checks include one-sample overloads between UI polls, actual-editor clip
+reset, relatching, and concurrent telemetry reads. Default, showcase and clipping
+editor renders were inspected and saved. The installed AU signature verifies,
+its executable matches the build, and Apple AU validation succeeds. The prior
+Rust AU is backed up. Restart Logic to load it. Milestone 6, two sound layers,
+is next.
+
+## Milestone 6 delivery
+
+Completed 2026-11-05. Added independent A/B oscillator, ADSR and sequence banks,
+layer level, stereo pan, semitone transpose and cent detune. Performance/MIDI,
+arpeggiator, modulation and master level stay shared. Layer B is off by default
+and skips synthesis when off. The 1320x930 editor has an A/B selector and layer
+side panel, with separate playheads and activity rows. Combined stereo output
+feeds the meter; mono outputs average the stereo mix.
+
+Version-2 state stores both layers. Version-1 Rust patches migrate into A with
+unity/center/zero added tuning and B disabled/cleared. Existing parameter IDs,
+plugin identity and original parameter ABI remain intact. 81 Rust tests, Clippy
+and all four CTest groups pass, including AU/VST3 stereo layers and native state
+migration/editor routing. Offline throughput results are in VALIDATION.md; the
+stereo demo is `dist/rebit-rust-layers-demo.wav`.
+
+The installed AU signature and executable hash verify, and Apple AU validation
+passes. The previous Rust component is backed up. Restart Logic, turn B on, and
+use EDIT A / EDIT B to choose the sound/sequence controls. Milestone 7 is next.

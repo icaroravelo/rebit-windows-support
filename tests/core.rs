@@ -391,3 +391,246 @@ fn host_transport_render_is_chunk_invariant_and_allocation_free() {
     assert_eq!(ALLOCS.with(Cell::get), 0);
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn rapid_live_changes_are_chunk_invariant_and_allocation_free() {
+    fn edit(e: &mut Engine, event: usize) {
+        e.set_parameters(Parameters {
+            max_poly: [1, 8, 2, 64][event % 4],
+            behavior: (event % 4) as i32,
+            osc: (event % 3) as i32,
+            duty: ((event / 3) % 3) as i32,
+            noise_algorithm: ((event / 5) % 3) as i32,
+            gain: (event % 11) as f32 / 10.,
+            sustain: (event % 7) as f32 / 6.,
+            attack: if event.is_multiple_of(2) { 0. } else { 0.002 },
+            bend_range: (event % 25) as f32,
+            sweep_initial: (event % 49) as f32 - 24.,
+            vibrato_depth: 1.,
+            vibrato_delay: 0.,
+            ..Default::default()
+        });
+        let note = (event % 128) as u8;
+        e.midi(0x90, note, 100);
+        e.midi(0xe0, (event % 128) as u8, (event % 128) as u8);
+        if event > 10 {
+            e.midi(0x80, ((event - 10) % 128) as u8, 0);
+        }
+    }
+    let mut a = Engine::new(48000., 123);
+    let mut b = Engine::new(48000., 123);
+    let mut expected = vec![0.; 128 * 73];
+    let mut actual = vec![0.; expected.len()];
+    for (event, chunk) in expected.chunks_mut(73).enumerate() {
+        edit(&mut a, event);
+        a.render(chunk);
+    }
+    ALLOCS.with(|c| c.set(0));
+    TRACK.with(|c| c.set(true));
+    for (event, chunk) in actual.chunks_mut(73).enumerate() {
+        edit(&mut b, event);
+        for part in chunk.chunks_mut(7) {
+            b.render(part);
+        }
+    }
+    b.midi(0xb0, 120, 0);
+    let mut silence = [1.; 128];
+    b.render(&mut silence);
+    TRACK.with(|c| c.set(false));
+    assert_eq!(ALLOCS.with(Cell::get), 0);
+    assert_eq!(actual, expected);
+    assert!(actual.iter().all(|x| x.is_finite()));
+    assert_eq!(silence, [0.; 128]);
+}
+
+#[test]
+fn playback_feedback_measures_post_gain_output_and_silent_voices() {
+    let mut e = Engine::new(8000., 1);
+    assert_eq!(e.playback_info(), rebit_rust::PlaybackInfo::default());
+    e.midi(0x90, 0, 127);
+    e.midi(0x90, 1, 127);
+    let output = audio(&mut e, 32);
+    let info = e.playback_info();
+    assert_eq!(info.peak, peak(&output));
+    assert_eq!(info.held_peak, 1.);
+    assert_eq!(info.clips, 32);
+    assert_eq!(info.active, 2);
+    assert_eq!(info.held, 2);
+    assert_eq!(info.released, 0);
+    e.reset();
+    e.set_parameters(Parameters {
+        gain: 0.25,
+        ..e.parameters()
+    });
+    e.midi(0x90, 0, 127);
+    e.midi(0x90, 1, 127);
+    audio(&mut e, 32);
+    assert_eq!(e.playback_info().held_peak, 0.5);
+    let clips = e.playback_info().clips;
+    e.set_parameters(Parameters {
+        volume_enabled: 1,
+        ..e.parameters()
+    });
+    e.reset();
+    e.midi(0x90, 0, 127);
+    assert_eq!(audio(&mut e, 64), vec![0.; 64]);
+    let info = e.playback_info();
+    assert_eq!(info.active, 1);
+    assert_eq!(info.held, 1);
+    assert_eq!(info.peak, 0.);
+    assert_eq!(info.held_peak, 0.);
+    assert_eq!(info.clips, clips);
+}
+
+#[test]
+fn playback_activity_distinguishes_releases_pedals_and_retirement() {
+    let mut e = Engine::new(8000., 1);
+    e.set_parameters(Parameters {
+        release: 0.1,
+        ..e.parameters()
+    });
+    for note in [0, 1, 2] {
+        e.midi(0x90, note, 127);
+    }
+    audio(&mut e, 32);
+    e.midi(0x80, 0, 0);
+    audio(&mut e, 16);
+    let info = e.playback_info();
+    assert_eq!(
+        (info.active, info.held, info.released, info.fading),
+        (3, 2, 1, 0)
+    );
+    e.midi(0xb0, 64, 127);
+    e.midi(0x80, 1, 0);
+    audio(&mut e, 16);
+    assert_eq!(e.playback_info().held, 2);
+    e.set_parameters(Parameters {
+        max_poly: 1,
+        ..e.parameters()
+    });
+    let info = e.playback_info();
+    assert_eq!(
+        (info.active, info.held, info.released, info.fading),
+        (1, 1, 0, 2)
+    );
+    audio(&mut e, 24);
+    assert_eq!(e.playback_info().fading, 0);
+    e.midi(0xb0, 120, 0);
+    audio(&mut e, 16);
+    assert_eq!(e.playback_info().active, 0);
+    assert_eq!(e.playback_info().fading, 0);
+    assert!(e.playback_info().held_peak > 0.); // Meter history is independent of current voice count.
+}
+
+#[test]
+fn playback_feedback_is_chunk_invariant_and_allocation_free() {
+    let make = || {
+        let mut e = Engine::new(48000., 123);
+        e.set_parameters(Parameters {
+            osc: 2,
+            release: 0.01,
+            ..e.parameters()
+        });
+        for note in [48, 60, 67] {
+            e.midi(0x90, note, 127);
+        }
+        e
+    };
+    let mut a = make();
+    let mut b = make();
+    let expected = audio(&mut a, 4096);
+    a.midi(0xb0, 123, 0);
+    let expected_tail = audio(&mut a, 48000);
+    let mut actual = [0.; 4096];
+    let mut tail = [0.; 48000];
+    ALLOCS.with(|c| c.set(0));
+    TRACK.with(|c| c.set(true));
+    for part in actual.chunks_mut(37) {
+        b.render(part);
+        std::hint::black_box(b.playback_info());
+    }
+    b.midi(0xb0, 123, 0);
+    for part in tail.chunks_mut(137) {
+        b.render(part);
+        std::hint::black_box(b.playback_info());
+    }
+    TRACK.with(|c| c.set(false));
+    assert_eq!(ALLOCS.with(Cell::get), 0);
+    assert_eq!(actual.as_slice(), expected);
+    assert_eq!(tail.as_slice(), expected_tail);
+    assert_eq!(a.playback_info(), b.playback_info());
+    assert!(b.playback_info().clips > 0);
+    assert_eq!(b.playback_info().active, 0);
+}
+
+#[test]
+fn two_layer_automation_and_rendering_are_allocation_free_and_chunk_invariant() {
+    use rebit_rust::layers::{LayerMix, LayerMixer};
+    let make = || {
+        let mut a = Box::new(Engine::new(48000., 123));
+        let mut b = Box::new(Engine::new(48000., 456));
+        for e in [&mut a, &mut b] {
+            e.set_parameters(Parameters {
+                osc: 2,
+                max_poly: 16,
+                vibrato_depth: 0.2,
+                vibrato_delay: 0.,
+                release: 0.01,
+                ..Default::default()
+            });
+        }
+        let mut mixer = LayerMixer::default();
+        mixer.prepare(48000.);
+        (a, b, mixer)
+    };
+    let edit = |a: &mut Engine, b: &mut Engine, m: &mut LayerMixer, i: usize| {
+        a.set_tuning((i % 49) as f64 - 24.);
+        b.set_tuning((i % 101) as f64 * 0.01 - 12.);
+        m.set_mix(
+            0,
+            LayerMix {
+                enabled: 1,
+                gain: 0.7,
+                pan: (i % 21) as f32 * 0.1 - 1.,
+            },
+        );
+        m.set_mix(
+            1,
+            LayerMix {
+                enabled: i32::from(!i.is_multiple_of(4)),
+                gain: 0.3,
+                pan: 1. - (i % 21) as f32 * 0.1,
+            },
+        );
+        for e in [a, b] {
+            e.midi(0x90, (48 + i % 24) as u8, 100);
+            if i > 8 {
+                e.midi(0x80, (48 + (i - 8) % 24) as u8, 0);
+            }
+        }
+    };
+    let (mut a, mut b, mut m) = make();
+    let (mut c, mut d, mut n) = make();
+    let mut l = vec![0.; 64 * 137];
+    let mut r = vec![0.; l.len()];
+    let mut x = vec![0.; l.len()];
+    let mut y = vec![0.; l.len()];
+    for (i, (left, right)) in l.chunks_mut(137).zip(r.chunks_mut(137)).enumerate() {
+        edit(&mut a, &mut b, &mut m, i);
+        m.render(&mut a, &mut b, left, right);
+    }
+    ALLOCS.with(|c| c.set(0));
+    TRACK.with(|c| c.set(true));
+    for (i, (left, right)) in x.chunks_mut(137).zip(y.chunks_mut(137)).enumerate() {
+        edit(&mut c, &mut d, &mut n, i);
+        for (left, right) in left.chunks_mut(7).zip(right.chunks_mut(7)) {
+            n.render(&mut c, &mut d, left, right);
+            std::hint::black_box(n.playback(&c, &d));
+        }
+    }
+    TRACK.with(|c| c.set(false));
+    assert_eq!(ALLOCS.with(Cell::get), 0);
+    assert_eq!(l, x);
+    assert_eq!(r, y);
+    assert_eq!(m.playback(&a, &b), n.playback(&c, &d));
+}

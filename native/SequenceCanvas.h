@@ -14,13 +14,14 @@ public:
     bool keyPressed(const juce::KeyPress&) override;
     int lane() const { return selectedLane; }
     void selectLane(int);
+    void selectLayer(int);
     std::function<void(int)> onLaneChanged;
     std::function<void(int)> onCommitted;
 private:
     RebitProcessor& processor;
     SequenceSnapshot data;
     uint64_t observedRevision=~uint64_t{};
-    int selectedLane=0, page=0, selectedStep=0, lastStep=-1, pitchRange=12;
+    int selectedLayer=0, selectedLane=0, page=0, selectedStep=0, lastStep=-1, pitchRange=12;
     int playhead=-1, dragMarker=0;
     bool dirty=false, drawing=false;
     std::array<juce::TextButton,3> tabs;

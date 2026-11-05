@@ -19,6 +19,7 @@ private:
     struct Knob;
     struct Choice;
     struct Keyboard;
+    struct PlaybackDisplay;
     class RebitLookAndFeel;
     enum KnobIndex { gain, poly, attack, decay, sustain, release, portamento, bend,
                      arpSpeed, vibratoRate, vibratoDepth, vibratoDelay, sweepPitch, sweepTime, arpGate, arpSwing, arpSeconds };
@@ -35,10 +36,18 @@ private:
     juce::Label sequenceStatus;
     std::unique_ptr<SequenceCanvas> sequenceCanvas;
     std::unique_ptr<Keyboard> keyboard;
+    std::unique_ptr<PlaybackDisplay> playbackDisplay;
     juce::TooltipWindow tooltips { this, 650 };
     bool midiActive = false;
     bool monoMode = false;
     bool arpPanel = true;
+    int selectedLayer=0;
+    bool switchingLayer=false;
+    juce::TextButton editA {"EDIT A"}, editB {"EDIT B"};
+    juce::ToggleButton layerAOn {"A on"},layerBOn {"B on"};
+    std::array<std::unique_ptr<Knob>,4> layerKnobs;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>,3> laneAttachments;
+    void selectLayer(int);
     juce::TextButton arpTab { "ARP" }, monoTab { "MONO" }, arpStop { "STOP" };
     juce::ToggleButton arpEnabled { "Arp on" }, arpLatch { "Latch" }, hostSync { "Host sync" };
     void updatePerformance();

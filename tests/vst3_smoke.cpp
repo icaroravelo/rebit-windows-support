@@ -38,6 +38,11 @@ int main(int argc,char** argv) {
     if(std::abs(buffer.getSample(0,600))<.49f){std::cerr<<"VST3 missed host grid\n";return 1;}
     host.set(.4,120.,false);midi.clear();plugin->processBlock(buffer,midi);
     if(buffer.getMagnitude(0,1200)>1e-7f){std::cerr<<"VST3 host stop failed\n";return 1;}
+    plugin->releaseResources();plugin->setPlayHead(nullptr);
+    if(!set("Arpeggiator",0)||!set("Layer B enabled",1)||!set("Layer B level",1)||!set("Layer A pan",0)||!set("Layer B pan",1)||!set("Layer B transpose",.5f))return 1;
+    plugin->prepareToPlay(8000,128);buffer.setSize(2,128);midi.clear();midi.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);
+    plugin->processBlock(buffer,midi);
+    if(std::abs(buffer.getSample(0,0)+.5f)>1e-6f||std::abs(buffer.getSample(1,0)+8.f/15.f)>1e-6f){std::cerr<<"VST3 stereo layer routing failed\n";return 1;}
     plugin->setPlayHead(nullptr);plugin->releaseResources();
     std::cout<<"VST3 discovery, instantiation, MIDI, stereo render, state recall, host PPQ/start-stop: passed\n";
 }

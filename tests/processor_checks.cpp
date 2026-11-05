@@ -11,6 +11,101 @@ int main() {
     try {
         juce::ScopedJuceInitialiser_GUI init;
         {
+            RebitProcessor layers;
+            auto set=[&](const char* id,float value){auto* p=layers.state.getParameter(id);require(p!=nullptr,"Missing layer parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};
+            set("layerBEnabled",1);set("layerBGain",1);set("layerBTranspose",0);set("layerAPan",-1);set("layerBPan",1);
+            layers.prepareToPlay(8000,128);juce::AudioBuffer<float> audio(2,128);juce::MidiBuffer events;
+            events.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);layers.processBlock(audio,events);
+            require(std::abs(audio.getSample(0,0)+.5f)<1e-6f&&std::abs(audio.getSample(1,0)+8.f/15.f)<1e-6f,"Independent layer stereo routing failed");
+            const auto activity=layers.playbackInfo();require(activity.layers[0].active==1&&activity.layers[1].active==1&&activity.active==2,"Layer activity did not report both engines");
+            auto editor=std::unique_ptr<juce::AudioProcessorEditor>(layers.createEditor());
+            juce::TextButton *editA=nullptr,*editB=nullptr;juce::ComboBox* waveform=nullptr;SequenceCanvas* canvas=nullptr;juce::TextEditor* volumeText=nullptr;
+            for(auto* child:editor->getChildren()){
+                if(child->getName()=="Edit layer A")editA=dynamic_cast<juce::TextButton*>(child);
+                if(child->getName()=="Edit layer B")editB=dynamic_cast<juce::TextButton*>(child);
+                if(auto* graph=dynamic_cast<SequenceCanvas*>(child))canvas=graph;
+                if(child->getName()=="Volume sequence")volumeText=dynamic_cast<juce::TextEditor*>(child);
+                for(auto* nested:child->getChildren())if(nested->getName()=="WAVEFORM")waveform=dynamic_cast<juce::ComboBox*>(nested);
+            }
+            require(editA&&editB&&waveform&&canvas&&volumeText,"Layer editor controls missing");editB->onClick();
+            require(waveform->getSelectedItemIndex()==1,"Selecting B did not bind its triangle oscillator");
+            waveform->setSelectedItemIndex(2,juce::sendNotificationSync);
+            require(layers.state.getRawParameterValue("layerBOsc")->load()==2.f&&layers.state.getRawParameterValue("osc")->load()==0.f,"B edit changed the wrong oscillator");
+            canvas->keyPressed(juce::KeyPress(juce::KeyPress::upKey));
+            require(!layers.sequenceText(0,1).isEmpty()&&layers.sequenceText(0,0).isEmpty(),"B graphical sequence edit wrote into A");
+            require(layers.state.getRawParameterValue("layerBVolumeEnabled")->load()>.5f&&layers.state.getRawParameterValue("isVolumeSequenceEnabled_raw")->load()<.5f,"Drawing enabled the wrong layer lane");
+            volumeText->setText("16",false);editA->onClick();require(editB->getToggleState(),"Layer switch discarded an invalid sequence draft");
+            volumeText->setText("15",false);editA->onClick();require(editA->getToggleState()&&layers.sequenceText(0,1)=="15"&&layers.sequenceText(0).isEmpty(),"Layer switch did not preserve the valid B draft");
+            layers.setSequenceText(1,"[0,12]",1);layers.setSequenceText(2,"[0,2]",1);
+            juce::MemoryBlock saved;layers.getStateInformation(saved);set("layerBEnabled",0);set("layerBOsc",0);layers.setSequenceText(0,"",1);
+            layers.setStateInformation(saved.getData(),(int)saved.getSize());
+            require(layers.state.getRawParameterValue("layerBEnabled")->load()>.5f&&layers.state.getRawParameterValue("layerBOsc")->load()==2.f&&layers.sequenceText(0,1)=="15"&&layers.sequenceText(1,1)=="[0,12]","Version-2 layer state failed to round-trip");
+            juce::XmlElement bad("RebitRust");bad.setAttribute("version",2);bad.addChildElement(layers.state.copyState().createXml().release());
+            bad.createNewChildElement("volume")->addTextElement("1");bad.createNewChildElement("layerB")->createNewChildElement("pitch")->addTextElement("128");
+            juce::MemoryBlock rejected;juce::AudioProcessor::copyXmlToBinary(bad,rejected);layers.setStateInformation(rejected.getData(),(int)rejected.getSize());
+            require(layers.sequenceText(0).isEmpty()&&layers.sequenceText(0,1)=="15"&&layers.sequenceText(1,1)=="[0,12]","Malformed B state partially replaced a layer bank");
+            auto tree=layers.state.copyState();
+            for(int i=tree.getNumChildren();--i>=0;)if(tree.getChild(i).getProperty("id").toString().startsWith("layer"))tree.removeChild(i,nullptr);
+            juce::XmlElement root("RebitRust");root.setAttribute("version",1);root.addChildElement(tree.createXml().release());
+            juce::MemoryBlock legacy;juce::AudioProcessor::copyXmlToBinary(root,legacy);layers.setStateInformation(legacy.getData(),(int)legacy.getSize());
+            require(layers.state.getRawParameterValue("layerBEnabled")->load()<.5f&&layers.state.getRawParameterValue("layerAEnabled")->load()>.5f,"Legacy patch inherited layer enable state");
+            require(std::abs(layers.state.getRawParameterValue("layerAPan")->load())<1e-6f&&std::abs(layers.state.getRawParameterValue("layerAGain")->load()-1.f)<1e-6f&&layers.sequenceText(0,1).isEmpty(),"Legacy patch inherited mix settings or B sequences");
+            layers.processBlock(audio,events);events.addEvent(juce::MidiMessage::noteOn(1,0,(juce::uint8)127),0);layers.processBlock(audio,events);
+            require(std::abs(audio.getSample(0,0)+.5f)<1e-6f&&std::abs(audio.getSample(0,0)-audio.getSample(1,0))<1e-8f,"Legacy migration changed original mono/centre sound");
+        }
+        {
+            RebitProcessor feedback;feedback.prepareToPlay(8000,256);
+            juce::AudioBuffer<float> audio(2,256);juce::MidiBuffer events;
+            for(int note:{0,1,2}){
+                events.addEvent(juce::MidiMessage::noteOn(1,note,(juce::uint8)127),17);
+                events.addEvent(juce::MidiMessage::noteOff(1,note),18);
+            }
+            feedback.processBlock(audio,events);
+            const auto burst=feedback.playbackInfo();
+            require(std::abs(audio.getSample(0,17)+1.5f)<1e-6f,"Meter workload was not an over-range burst");
+            require(burst.heldPeak==1.5f&&burst.peak>1.3f&&burst.clipped,"Meter lost a one-sample clipped burst before polling");
+            require(burst.active==0&&burst.held==0&&burst.released==0&&burst.fading==0,"Finished burst left active voice feedback");
+            // Opening the real editor after a burst must retain clip history.
+            auto editor=std::unique_ptr<juce::AudioProcessorEditor>(feedback.createEditor());
+            juce::TextButton* clip=nullptr;
+            for(auto* child:editor->getChildren())for(auto* nested:child->getChildren())
+                if(nested->getName()=="Clear output clipping")clip=dynamic_cast<juce::TextButton*>(nested);
+            require(clip&&clip->getToggleState(),"Real editor did not show the latched clip indication");
+            clip->onClick();require(!clip->getToggleState()&&!feedback.playbackInfo().clipped,"Clip reset control did not acknowledge the event");
+            feedback.processBlock(audio,events);require(!feedback.playbackInfo().clipped,"Silence re-latched old clip history");
+            for(int note:{0,1,2})events.addEvent(juce::MidiMessage::noteOn(1,note,(juce::uint8)127),0);
+            feedback.processBlock(audio,events);require(feedback.playbackInfo().clipped,"Further clipping failed to relatch");
+            require(feedback.playbackInfo().active==3&&feedback.playbackInfo().held==3,"Held voice feedback differs from rendered chord");
+            std::atomic<bool> done{false},bad{false};
+            std::thread reader([&]{while(!done.load()){
+                const auto snapshot=feedback.playbackInfo();
+                if(!std::isfinite(snapshot.peak)||snapshot.active>64||snapshot.active!=snapshot.held+snapshot.released||snapshot.fading>64)bad=true;
+                feedback.clearClip();
+            }});
+            for(int i=0;i<100;++i)feedback.processBlock(audio,events);
+            done=true;reader.join();require(!bad.load(),"Concurrent telemetry read/acknowledgement produced invalid activity");
+            feedback.stopArpeggiator();feedback.processBlock(audio,events);
+            require(feedback.playbackInfo().active==0&&feedback.playbackInfo().peak==0.f,"STOP did not clear output/activity feedback");
+        }
+        {
+            RebitProcessor smooth;
+            auto set=[&](const char* id,float value){auto* p=smooth.state.getParameter(id);require(p!=nullptr,"Missing live-change parameter");p->setValueNotifyingHost(p->convertTo0to1(value));};
+            smooth.prepareToPlay(8000,200);juce::AudioBuffer<float> audio(2,200);juce::MidiBuffer events;
+            for(int note:{0,1,2})events.addEvent(juce::MidiMessage::noteOn(1,note,(juce::uint8)127),0);
+            smooth.processBlock(audio,events);
+            require(std::abs(audio.getSample(0,199)-1.5f)<1e-6f,"Live-change chord setup failed");
+            set("maxPoly",1);audio.setSize(2,40);smooth.processBlock(audio,events);
+            require(audio.getSample(0,0)>1.4f&&std::abs(audio.getSample(0,39)-.5f)<1e-6f,"Voice reduction did not fade while keeping a held note");
+            set("maxPoly",3);smooth.processBlock(audio,events);
+            // Restored notes start at phase zero; the retained note keeps its phase.
+            require(std::abs(audio.getSample(0,39)+.5f)<1e-6f,"Voice expansion did not restore physically held keys");
+            set("gain",0);smooth.processBlock(audio,events);
+            require(std::abs(audio.getSample(0,0))>.45f&&audio.getSample(0,39)==0.f,"Live gain was not smoothed over five ms");
+            for(int note:{0,1,2})events.addEvent(juce::MidiMessage::noteOff(1,note),0);
+            smooth.processBlock(audio,events);set("gain",.5f);smooth.processBlock(audio,events);
+            require(audio.getMagnitude(0,40)==0.f,"Held-key restoration left a stuck note");
+        }
+        {
             RebitProcessor graphical;
             graphical.setSequenceText(0,"[15x12]|3,2,1,0");
             SequenceCanvas canvas(graphical);canvas.setSize(1032,148);
@@ -127,7 +222,8 @@ int main() {
         require(p.sequenceText(0).isEmpty(),"Empty saved sequence did not clear current data");
         midi.addEvent(juce::MidiMessage::noteOn(1,60,(juce::uint8)127),0);
         std::atomic<bool> running{true};
-        std::thread writer([&]{for(int i=0;i<1000;++i)p.setSequenceText(i%3,i%3==1?"0[7,12]|0":i%3==0?"15[10,5]|0":"0[1,2]|0");running=false;});
+        p.state.getParameter("layerBEnabled")->setValueNotifyingHost(1.f);
+        std::thread writer([&]{for(int i=0;i<1000;++i)p.setSequenceText(i%3,i%3==1?"0[7,12]|0":i%3==0?"15[10,5]|0":"0[1,2]|0",i%2);running=false;});
         while(running.load()){
             p.processBlock(buffer,midi);
             for(int i=0;i<128;++i)require(std::isfinite(buffer.getSample(0,i)),"Nonfinite output during sequence handoff");

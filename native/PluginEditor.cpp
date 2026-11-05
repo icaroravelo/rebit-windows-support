@@ -298,8 +298,15 @@ struct RebitEditor::Knob final : public juce::Component
         if (parameter != nullptr) slider.setDoubleClickReturnValue (true, parameter->convertFrom0to1 (parameter->getDefaultValue()));
         addAndMakeVisible (title); addAndMakeVisible (slider);
         attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (state, id, slider);
-        slider.setNumDecimalPlacesToDisplay (id == "maxPoly" || id == "bendRange" || id == "sweepInitialPitch" || id == "arpGate" || id == "arpSwing" ? 0 : id == "gain" || id == "suslevel" ? 2 : 3);
-        slider.textFromValueFunction = nullptr; slider.updateText();
+        slider.setNumDecimalPlacesToDisplay (id == "maxPoly" || id == "bendRange" || id == "sweepInitialPitch" || id == "arpGate" || id == "arpSwing" || id.endsWith("Transpose") || id.endsWith("Detune") ? 0 : id == "gain" || id == "suslevel" || id.endsWith("Gain") || id.endsWith("Pan") ? 2 : 3);
+        slider.textFromValueFunction = nullptr;
+        if(id.endsWith("Pan"))slider.textFromValueFunction=[](double value){return juce::String(std::abs(value)<1e-6?0.:value,2);};
+        slider.updateText();
+    }
+    void bind(juce::AudioProcessorValueTreeState& state,const char* id) {
+        attachment.reset();
+        if(auto* p=state.getParameter(id))slider.setDoubleClickReturnValue(true,p->convertFrom0to1(p->getDefaultValue()));
+        attachment=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(state,id,slider);
     }
     void resized() override
     {
@@ -320,9 +327,86 @@ struct RebitEditor::Choice final : public juce::Component
         addAndMakeVisible (title); addAndMakeVisible (box);
         attachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (state, id, box);
     }
+    void bind(juce::AudioProcessorValueTreeState& state,const char* id) {
+        attachment.reset();attachment=std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(state,id,box);
+    }
     void resized() override
     {
         auto r = getLocalBounds(); title.setBounds (r.removeFromTop (16)); box.setBounds (r);
+    }
+};
+
+// The display polls only the processor's lock-free published copy. It never
+// touches Rust engine state. The waveform behind it remains a parameter preview.
+struct RebitEditor::PlaybackDisplay final : juce::Component, juce::SettableTooltipClient, private juce::Timer
+{
+    RebitProcessor& processor;
+    juce::TextButton clip { "CLIP" };
+    PlaybackSnapshot playback;
+    uint32_t revision=0;
+    double lastAudio=0.;
+    bool idle=true;
+    const juce::Colour red {0xffff727e};
+    explicit PlaybackDisplay(RebitProcessor& p) : processor(p) {
+        setName("Output and voice activity");
+        setTooltip("Actual output sample peaks, in dBFS. Mint tiles are held/pedalled voices; amber tiles are releases. +FADE counts brief voice-removal continuations. The waveform is a parameter preview.");
+        clip.setName("Clear output clipping");clip.setTooltip("Latched when output reaches 0 dBFS. Click to clear; further clipping lights it again. Lower LEVEL or reduce stacked voices. Output is not limited.");
+        clip.getProperties().set("sequenceSmall",true);clip.setColour(accentColourId,red);
+        addAndMakeVisible(clip);clip.onClick=[this]{processor.clearClip();refresh();};
+        refresh();startTimerHz(30);
+    }
+    ~PlaybackDisplay() override {stopTimer();}
+    static float db(float value) {return value>0.f?20.f*std::log10(value):-120.f;}
+    void refresh() {
+        playback=processor.playbackInfo();
+        const auto now=juce::Time::getMillisecondCounterHiRes();
+        if(playback.revision!=revision){revision=playback.revision;lastAudio=now;}
+        // A suspended host sends no silence buffers. Do not leave a frozen meter
+        // or frozen activity on screen; clip history remains until acknowledged.
+        idle=revision==0 || now-lastAudio>(double)playback.idleAfterMs;
+        if(idle){playback.peak=playback.heldPeak=0.f;playback.active=playback.held=playback.released=playback.fading=0;playback.layers={};}
+        clip.setToggleState(playback.clipped,juce::dontSendNotification);
+        repaint();
+    }
+    void timerCallback() override {refresh();}
+    void resized() override {clip.setBounds(374,68,61,20);}
+    void paint(juce::Graphics& g) override {
+        g.setColour(line.withAlpha(.75f));g.drawVerticalLine(361,3.f,88.f);
+        caption(g,"OUTPUT",{374,0,80,14},muted,8.5f,true);
+        const auto peakDb=db(playback.heldPeak);
+        const auto peakText=playback.heldPeak>0.f?juce::String(peakDb,1)+" dBFS":juce::String("-INF dBFS");
+        caption(g,peakText,{374,17,148,18},playback.clipped?red:ink,12.f,true);
+        const float levelDb=db(playback.peak);
+        constexpr int segments=22;
+        constexpr float x=374.f,y=40.f,width=148.f;
+        for(int i=0;i<segments;++i){
+            const float threshold=-60.f+3.f*(float)i;
+            const auto colour=threshold>=0.f?red:threshold>=-12.f?amber:mint;
+            const juce::Rectangle<float> bar(x+(float)i*width/(float)segments,y,width/(float)segments-2.f,10.f);
+            g.setColour(colour.withAlpha(levelDb>=threshold?0.9f:0.09f));g.fillRect(bar);
+        }
+        if(playback.heldPeak>0.f){
+            const float marker=x+juce::jlimit(0.f,1.f,(peakDb+60.f)/66.f)*(width-1.f);
+            g.setColour(ink);g.fillRect(marker,y-3.f,1.f,3.f);
+        }
+        caption(g,"-60",{374,52,32,12},muted,7.f,true);
+        caption(g,"-24",{450,52,32,12},muted,7.f,true);
+        caption(g,"0",{506,52,16,12},muted,7.f,true);
+        caption(g,"0 dBFS",{444,70,78,16},playback.clipped?red:muted,8.f,true);
+        const int limit=(int)processor.state.getRawParameterValue("maxPoly")->load(std::memory_order_relaxed);
+        const auto activity=idle?juce::String("AUDIO IDLE"):
+            juce::String::formatted("A %02u/%02d   B %02u/%02d   +%02u FADE",playback.layers[0].active,limit,playback.layers[1].active,limit,playback.fading);
+        caption(g,activity,{7,60,345,14},idle?muted:ink,8.f,true);
+        for(int layer=0;layer<2;++layer){
+            const auto info=playback.layers[(size_t)layer];const float tileY=77.f+(float)layer*7.f;
+            caption(g,layer==0?"A":"B",{7,(int)tileY-2,10,9},layer==0?mint:violet,7.f,true);
+            for(int i=0;i<64;++i){
+                const bool held=(uint32_t)i<info.held,released=(uint32_t)i>=info.held&&(uint32_t)i<info.active;
+                const auto colour=held?(layer==0?mint:violet):released?amber:line;
+                const float tileX=20.f+(float)i*5.13f;
+                g.setColour(colour.withAlpha(held||released?.95f:.7f));g.fillRect(tileX,tileY,3.f,4.f);
+            }
+        }
     }
 };
 
@@ -339,7 +423,7 @@ RebitEditor::RebitEditor (RebitProcessor& p)
         control->slider.lookAndFeelChanged();
         knobs.push_back (std::move (control));
     };
-    knob ("gain", "LEVEL", "", mint); knob ("maxPoly", "VOICES", "", mint);
+    knob ("gain", "MASTER", "", mint); knob ("maxPoly", "VOICES", "", mint);
     knob ("attack", "ATTACK", " s", amber); knob ("decay", "DECAY", " s", amber);
     knob ("suslevel", "SUSTAIN", "", amber); knob ("release", "RELEASE", " s", amber);
     knob ("portamentoTime", "GLIDE", " s", cyan); knob ("bendRange", "BEND RANGE", " st", cyan);
@@ -384,6 +468,10 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     choices[arpRate]->box.setTooltip("Musical rates follow host tempo. Dotted steps are 1.5x; triplets are 2/3. Seconds uses Step Time.");
     choices[arpArticulation]->box.setTooltip("Retrigger restarts the envelope and sequences every step. Legato continues them at 100% Gate; shorter gates create separate notes.");
     choices[monoBehavior]->box.setTooltip("Mono modes require 1 voice and Arp off. Legacy arps are retained for existing patches.");
+    knobs[poly]->slider.setTooltip("Keep held keys when changing Voices. Mono keeps the latest key; raising Voices restores held keys. Removed voices fade briefly.");
+    choices[oscillator]->box.setTooltip("Waveform changes crossfade over 5 ms while held notes keep their phase and sequence position.");
+    choices[pulseDuty]->box.setTooltip("Manual pulse-width edits crossfade over 5 ms. Duty sequence frames retain their chip-style steps.");
+    choices[noiseAlgorithm]->box.setTooltip("Noise types crossfade over 5 ms during playback.");
     ignoreWheel.setColour (accentColourId, violet); addAndMakeVisible (ignoreWheel);
     ignoreWheel.setTooltip ("When enabled, vibrato depth does not depend on MIDI CC1.");
     toggles.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (instrument.state, "vibratoIgnoresWheel_raw", ignoreWheel));
@@ -395,22 +483,22 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     {
         sequenceEnabled[i].setButtonText (names[i]); sequenceEnabled[i].setColour (accentColourId, accents[i]);
         addAndMakeVisible (sequenceEnabled[i]);
-        toggles.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (instrument.state, ids[i], sequenceEnabled[i]));
+        laneAttachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,ids[i],sequenceEnabled[i]);
         auto& editor = sequenceEditors[i]; editor.setName (juce::String (names[i]) + " sequence");
         editor.setMultiLine (false); editor.setReturnKeyStartsNewLine (false); editor.setFont (type (12, true));
         editor.setTextToShowWhenEmpty (placeholders[i], muted.withAlpha (0.5f));
-        editor.setText (instrument.sequenceText ((int) i), false); lastCommittedSequences[i] = editor.getText();
+        editor.setText (instrument.sequenceText ((int) i,selectedLayer), false); lastCommittedSequences[i] = editor.getText();
         editor.setIndents (12, 8);
         editor.setTooltip (juce::String (names[i]) + " sequence: comma-separated values, [loop], | release. Press Return to apply.");
         editor.onReturnKey = [this, i] { applySequence ((int) i); };
-        editor.onFocusLost = [this, i] { applySequence ((int) i); }; addAndMakeVisible (editor);
+        editor.onFocusLost = [this, i] { if(!switchingLayer)applySequence ((int) i); }; addAndMakeVisible (editor);
     }
     sequenceCanvas=std::make_unique<SequenceCanvas>(instrument);
     sequenceCanvas->onLaneChanged=[this](int lane){
         for(size_t i=0;i<3;++i)sequenceEditors[i].setVisible((int)i==lane);
     };
     sequenceCanvas->onCommitted=[this](int lane){
-        const auto text=instrument.sequenceText(lane);
+        const auto text=instrument.sequenceText(lane,selectedLayer);
         sequenceEditors[(size_t)lane].setText(text,false);lastCommittedSequences[(size_t)lane]=text;
         sequenceEditors[(size_t)lane].setColour(juce::TextEditor::outlineColourId,line);
         sequenceStatus.setColour(juce::Label::textColourId,muted);
@@ -431,7 +519,24 @@ RebitEditor::RebitEditor (RebitProcessor& p)
     addAndMakeVisible (*keyboard);
     if(choices[monoBehavior]->box.getSelectedItemIndex()==1||choices[monoBehavior]->box.getSelectedItemIndex()==2)
         arpPanel=arpEnabled.getToggleState();
-    setSize (1120, 930); updatePerformance();startTimerHz (15); timerCallback();
+    playbackDisplay=std::make_unique<PlaybackDisplay>(instrument);addAndMakeVisible(*playbackDisplay);
+    for(auto* button:{&editA,&editB}){button->getProperties().set("sequenceSmall",true);addAndMakeVisible(*button);}
+    editA.setName("Edit layer A");editB.setName("Edit layer B");
+    editA.onClick=[this]{selectLayer(0);};editB.onClick=[this]{selectLayer(1);};
+    editA.setColour(accentColourId,mint);editB.setColour(accentColourId,violet);editA.setToggleState(true,juce::dontSendNotification);
+    layerAOn.setColour(accentColourId,mint);layerBOn.setColour(accentColourId,violet);addAndMakeVisible(layerAOn);addAndMakeVisible(layerBOn);
+    layerAOn.setTooltip("Layer A audio on/off. MIDI and the shared performance clock continue while muted.");
+    layerBOn.setTooltip("Layer B audio on/off. Enabling starts its own envelope/sequences from the held chord and current arp step. Disabled B skips synthesis after the short fade.");
+    toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"layerAEnabled",layerAOn));
+    toggles.push_back(std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,"layerBEnabled",layerBOn));
+    const char* mixIds[]={"layerAGain","layerAPan","layerATranspose","layerADetune"};
+    const char* mixNames[]={"LAYER LEVEL","PAN","TRANSPOSE","DETUNE"};const char* suffixes[]={"",""," st"," ct"};
+    for(size_t i=0;i<4;++i){
+        layerKnobs[i]=std::make_unique<Knob>(instrument.state,mixIds[i],mixNames[i],suffixes[i],mint);addAndMakeVisible(*layerKnobs[i]);
+        layerKnobs[i]->slider.setColour(juce::Slider::textBoxOutlineColourId,juce::Colours::transparentBlack);layerKnobs[i]->slider.lookAndFeelChanged();
+    }
+    layerKnobs[1]->slider.setTooltip("Stereo balance. Centre preserves unity in both channels; hard left/right silences the opposite channel. Mono outputs average left/right.");
+    setSize (1320, 930); updatePerformance();startTimerHz (15); timerCallback();
 }
 
 RebitEditor::~RebitEditor()
@@ -439,9 +544,36 @@ RebitEditor::~RebitEditor()
     stopTimer(); setLookAndFeel (nullptr);
 }
 
+void RebitEditor::selectLayer(int layer) {
+    layer=juce::jlimit(0,1,layer);if(layer==selectedLayer)return;
+    // Validate drafts before rebinding; a focus-loss callback must never write
+    // the previous layer's text into the newly selected layer.
+    for(size_t lane=0;lane<3;++lane)if(sequenceEditors[lane].getText()!=lastCommittedSequences[lane]){
+        const auto error=instrument.setSequenceText((int)lane,sequenceEditors[lane].getText(),selectedLayer);
+        if(error.isNotEmpty()){sequenceStatus.setText(error,juce::dontSendNotification);sequenceStatus.setColour(juce::Label::textColourId,amber);return;}
+    }
+    switchingLayer=true;sequenceCanvas->selectLayer(layer);selectedLayer=layer;
+    const char* soundKnobs[]={"attack","decay","suslevel","release"};
+    for(size_t i=0;i<4;++i)knobs[(size_t)attack+i]->bind(instrument.state,RebitProcessor::layerParameter(soundKnobs[i],layer));
+    const char* soundChoices[]={"osc","duty","noiseAlgorithm_raw","pitchSequenceMode_raw"};
+    const size_t choiceIndices[]={oscillator,pulseDuty,noiseAlgorithm,pitchMode};
+    for(size_t i=0;i<4;++i)choices[choiceIndices[i]]->bind(instrument.state,RebitProcessor::layerParameter(soundChoices[i],layer));
+    const char* lanes[]={"isVolumeSequenceEnabled_raw","isPitchSequenceEnabled_raw","isDutySequenceEnabled_raw"};
+    for(size_t i=0;i<3;++i){
+        laneAttachments[i].reset();laneAttachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(instrument.state,RebitProcessor::layerParameter(lanes[i],layer),sequenceEnabled[i]);
+        const auto text=instrument.sequenceText((int)i,layer);sequenceEditors[i].setText(text,false);lastCommittedSequences[i]=text;
+    }
+    const char* aIds[]={"layerAGain","layerAPan","layerATranspose","layerADetune"};
+    const char* bIds[]={"layerBGain","layerBPan","layerBTranspose","layerBDetune"};
+    for(size_t i=0;i<4;++i){layerKnobs[i]->bind(instrument.state,layer==0?aIds[i]:bIds[i]);layerKnobs[i]->slider.setColour(accentColourId,layer==0?mint:violet);}
+    editA.setToggleState(layer==0,juce::dontSendNotification);editB.setToggleState(layer==1,juce::dontSendNotification);
+    sequenceStatus.setText(layer==0?"Editing layer A. Performance and modulation are shared.":"Editing layer B. Performance and modulation are shared.",juce::dontSendNotification);
+    switchingLayer=false;timerCallback();repaint();
+}
+
 void RebitEditor::applySequence (int index)
 {
-    const auto error = instrument.setSequenceText (index, sequenceEditors[(size_t) index].getText());
+    const auto error = instrument.setSequenceText (index, sequenceEditors[(size_t) index].getText(),selectedLayer);
     const char* names[] = { "Volume", "Pitch", "Duty" };
     const auto success = error.isEmpty();
     if (success) lastCommittedSequences[(size_t) index] = sequenceEditors[(size_t) index].getText();
@@ -456,7 +588,7 @@ void RebitEditor::applyAllSequences()
 {
     for (int i = 0; i < 3; ++i)
     {
-        const auto error = instrument.setSequenceText (i, sequenceEditors[(size_t) i].getText());
+        const auto error = instrument.setSequenceText (i, sequenceEditors[(size_t) i].getText(),selectedLayer);
         sequenceEditors[(size_t) i].setColour (juce::TextEditor::outlineColourId, error.isEmpty() ? line : amber);
         if (error.isEmpty()) lastCommittedSequences[(size_t) i] = sequenceEditors[(size_t) i].getText();
         if (error.isNotEmpty())
@@ -485,7 +617,7 @@ void RebitEditor::timerCallback()
 {
     for (size_t i = 0; i < sequenceEditors.size(); ++i)
     {
-        const auto stored = instrument.sequenceText ((int) i);
+        const auto stored = instrument.sequenceText ((int) i,selectedLayer);
         if (stored != lastCommittedSequences[i] && !sequenceEditors[i].hasKeyboardFocus (true))
         {
             sequenceEditors[i].setText (stored, false); lastCommittedSequences[i] = stored;
@@ -530,17 +662,17 @@ void RebitEditor::paint (juce::Graphics& g)
     caption (g, waveNames[juce::jlimit (0, 2, oscType)], { 400, 59, 144, 25 }, ink, 18, true);
     g.setColour (mint.withAlpha (0.15f)); g.fillRect (401, 102, 8, 8);
     g.setColour (mint.withAlpha (midiActive ? 1.0f : 0.6f)); g.fillRect (403, 104, 4, 4);
-    caption (g, midiActive ? "MIDI ACTIVE" : "READY TO PLAY", { 418, 98, 128, 17 }, midiActive ? mint : muted, 9, true);
+    caption (g, midiActive ? "KEYS HELD" : "NO KEYS HELD", { 418, 98, 128, 17 }, midiActive ? mint : muted, 9, true);
     {
         juce::Graphics::ScopedSaveState save (g);
-        g.reduceClipRegion (juce::Rectangle<int> (550, 35, 530, 90));
-        for (int x = 552; x < 1080; x += 24)
+        g.reduceClipRegion (juce::Rectangle<int> (550, 35, 352, 59));
+        for (int x = 552; x < 902; x += 24)
         {
-            g.setColour (cyan.withAlpha (0.055f)); g.drawVerticalLine (x, 36, 124);
+            g.setColour (cyan.withAlpha (0.055f)); g.drawVerticalLine (x, 36, 94);
         }
-        for (int y = 40; y < 124; y += 20)
+        for (int y = 40; y < 94; y += 20)
         {
-            g.setColour (cyan.withAlpha (0.055f)); g.drawHorizontalLine (y, 550, 1080);
+            g.setColour (cyan.withAlpha (0.055f)); g.drawHorizontalLine (y, 550, 902);
         }
         juce::Path waveform;
         for (int i = 0; i <= 384; ++i)
@@ -559,24 +691,29 @@ void RebitEditor::paint (juce::Graphics& g)
                 const int step = i / 4;
                 v = (float) ((step * 37 + step * step * 11) % 17 - 8) / 8;
             }
-            const float x = 557 + (float) i / 384 * 516, y = 80 - v * 24;
+            const float x = 557 + (float) i / 384 * 338, y = 64 - v * 18;
             if (i == 0) waveform.startNewSubPath (x, y);
             else { waveform.lineTo (x, waveform.getCurrentPosition().y); waveform.lineTo (x, y); }
         }
         bloom (g, waveform, cyan.withAlpha (0.9f), 1.4f);
-        for (int y = 36; y < 124; y += 3)
+        for (int y = 36; y < 94; y += 3)
         {
-            g.setColour (juce::Colours::black.withAlpha (0.1f)); g.drawHorizontalLine (y, 550, 1080);
+            g.setColour (juce::Colours::black.withAlpha (0.1f)); g.drawHorizontalLine (y, 550, 902);
         }
     }
 
     const char* clockLabels[]={"FREE CLOCK","HOST STOP","HOST PLAY","FREE / NO HOST"};
     const int clock=juce::jlimit(0,3,instrument.clockStatus());
-    g.setColour(inset.withAlpha(.9f));g.fillRoundedRectangle(943,109,134,15,3);
-    caption(g,clockLabels[clock],{950,109,127,15},clock==2?cyan:muted,8.5f,true);
+    g.setColour(inset.withAlpha(.9f));g.fillRoundedRectangle(400,81,140,15,3);
+    caption(g,clockLabels[clock],{400,81,140,15},clock==2?cyan:muted,8.5f,true);
 
-    section (g, { 24, 160, 420, 170 }, "01", "OSCILLATOR", mint);
-    section (g, { 460, 160, 636, 170 }, "02", "AMPLITUDE", amber);
+    panelShape(g,{1112,24,184,112});caption(g,"SOUND LAYERS",{1128,32,152,18},ink,10.f,true);
+    section(g,{1112,160,184,648},"06",selectedLayer==0?"LAYER A":"LAYER B",selectedLayer==0?mint:violet);
+    caption(g,"INDEPENDENT SOUND",{1128,476,154,20},selectedLayer==0?mint:violet,9.f,true);
+    const char* help[]={"OSCILLATOR + ADSR","THREE SEQUENCE LANES","LEVEL + STEREO PAN","SEMITONES + CENTS","","SHARED PERFORMANCE","MASTER / MIDI / ARP","VOICES / MODULATION","","TRY A TRIANGLE SUB","TRANSPOSE B: -12 st"};
+    for(int i=0;i<11;++i)caption(g,help[i],{1128,505+i*21,154,18},muted,8.5f,true);
+    section (g, { 24, 160, 420, 170 }, "01", selectedLayer==0?"OSCILLATOR / A":"OSCILLATOR / B", selectedLayer==0?mint:violet);
+    section (g, { 460, 160, 636, 170 }, "02", selectedLayer==0?"AMPLITUDE / A":"AMPLITUDE / B", amber);
     // A relative-time ADSR diagram follows the current amplitude parameters.
     const float a = 0.12f + std::sqrt ((float) knobs[attack]->slider.getValue()) * 0.18f;
     const float d = 0.12f + std::sqrt ((float) knobs[decay]->slider.getValue()) * 0.18f;
@@ -597,20 +734,21 @@ void RebitEditor::paint (juce::Graphics& g)
     section (g, { 24, 346, 478, 184 }, "03", "PERFORMANCE", cyan);
 
     section (g, { 518, 346, 578, 184 }, "04", "MODULATION", violet);
-    section (g, { 24, 546, 1072, 262 }, "05", "FRAME SEQUENCES", cyan);
+    section (g, { 24, 546, 1072, 262 }, "05", selectedLayer==0?"SEQUENCES / A":"SEQUENCES / B", cyan);
     caption (g, choices[sequenceClock]->box.getSelectedItemIndex()==0?"60 Hz":"MUSICAL", { 1015, 555, 62, 20 }, cyan, 10, true);
     caption (g, "TEXT", { 40, 743, 56, 31 }, muted, 10, true);
     caption (g, "PLAY", { 25, 818, 60, 18 }, mint, 10, true);
     caption (g, "MIDI input or click the keys", { 81, 818, 280, 18 }, muted, 10);
     caption (g, "SCROLL TO CHANGE OCTAVE", { 882, 818, 214, 18 }, muted, 9, true);
-    g.setColour (line); g.drawHorizontalLine (907, 24, 1096);
+    g.setColour (line); g.drawHorizontalLine (907, 24, (float)getWidth()-24.f);
     caption (g, "REBIT RUST", { 24, 911, 140, 15 }, muted, 8.5f, true);
     caption (g, "PULSE / TRIANGLE / NOISE", { 426, 911, 300, 15 }, muted, 8.5f, true);
-    caption (g, juce::String ("v") + JucePlugin_VersionString, { 1048, 911, 48, 15 }, muted, 8.5f, true);
+    caption (g, juce::String ("v") + JucePlugin_VersionString, { getWidth()-72, 911, 48, 15 }, muted, 8.5f, true);
 }
 
 void RebitEditor::resized()
 {
+    if(playbackDisplay)playbackDisplay->setBounds(550,35,530,91);
     choices[oscillator]->setBounds (40, 202, 198, 48);
     choices[pulseDuty]->setBounds (40, 267, 94, 46);
     choices[noiseAlgorithm]->setBounds (145, 267, 94, 46);
@@ -638,5 +776,8 @@ void RebitEditor::resized()
     applySequences.setBounds (868, 744, 208, 30);
     sequenceStatus.setBounds (96, 781, 980, 20);
     sequenceCanvas->setBounds(40,584,1032,148);
-    keyboard->setBounds (24, 843, 1072, 54);
+    keyboard->setBounds (24, 843, getWidth()-48, 54);
+    editA.setBounds(1124,57,76,27);editB.setBounds(1210,57,76,27);
+    layerAOn.setBounds(1124,98,76,22);layerBOn.setBounds(1210,98,76,22);
+    for(size_t i=0;i<4;++i)if(layerKnobs[i])layerKnobs[i]->setBounds(1120+(int)(i%2)*88,208+(int)(i/2)*130,88,113);
 }

@@ -185,3 +185,197 @@ An additional regression confirms Host sync switching does not restart Seconds
 mode. The installed milestone-3 AU signature verifies, its executable hash
 matches the built AU, and `auval -v aumu RbR1 Rbit` reports AU VALIDATION
 SUCCEEDED. The previous Rust AU is preserved by the staged installer.
+
+## Milestone 4: smoother live changes, 2026-11-05
+
+Added sample-counted 5 ms gain/sustain ramps and waveform/manual-duty/noise-type
+crossfades. Noise algorithms have separate per-voice state. Pitch bend and live
+pitch/modulation settings interpolate tuning; ordinary sequence-frame pitch
+changes retain their original timing. ADSR/lane changes retain the voice and
+blend amplitude where a live edit would jump. A release-time edit recomputes
+the current tail's slope, with a 3 ms minimum for an edited zero release.
+
+Voice-count/mono-mode changes no longer reset keys or controllers. Reconciliation
+retains the newest held voices and preserves their phase, envelope, and sequence
+progress. Mono chooses the latest physical key; expansion restores physically
+held keys with fresh envelopes/sequences and a 3 ms fade-in. Discarded pedal-only
+notes are not resurrected. Independent-arp reconciliation prioritizes and remaps
+its current voice without resetting its clock or chord.
+
+Removed/stolen sounding voices continue as frozen oscillators for a 3 ms
+fade-out. There are at most 64 continuations beyond the 64 regular voices;
+overflow replaces the quietest continuation. These add bounded transient CPU
+cost; no performance speedup or universal click-free claim is made. Normal
+zero-release note-offs and arp gates stay immediate. Reset/STOP, channel-local
+All Sound Off, and host-synced arp stop clear applicable continuations immediately.
+
+- **63 Rust tests pass.** New regressions measure fade starts/endpoints across
+  8–384 kHz, timbre/duty/noise transitions and rapid retargeting, pitch ramps,
+  volume-lane transitions versus crisp frame edges, poly/mono restoration,
+  retained cursor/voice progress, pedals/controllers, current arp voices in high
+  slots, short retirement tails, immediate panic/host stop, and full tail pools.
+- A tracked allocator test applies rapid timbre, envelope, pitch, voice-count,
+  mode and MIDI edits during rendering. No Rust heap allocations/reallocations
+  or freeing occur. Continuous versus irregular 7-sample partitions are identical
+  with matching event positions. Existing transport/allocation tests also pass.
+- Clippy passes with warnings denied. All four CTest groups pass: Rust, native
+  processor, AU host, VST3 host. Native tests verify audible held-key restoration,
+  retirement and gain ramps via actual host parameters. The AU host measures the
+  gain fade crossing callbacks and settling exactly at 5 ms.
+- Native parameter reads now use cached stable atomic pointers and string views,
+  initialized once, avoiding repeated JUCE parameter-ID string construction in
+  the callback. State-recall checks continue to pass. The allocation instrument
+  covers Rust, not all JUCE or host operations.
+- Rendered and visually inspected the actual populated editor; layout is
+  unchanged and tooltips describe the live transitions. No new interactive Logic
+  or audible listening test is claimed.
+
+Parameter IDs, defaults, the 96-byte engine ABI and version-1 state are unchanged.
+Automation is received at callback boundaries; ramps then advance per sample.
+Sharp native oscillator edges and deliberate note/sequence articulation remain.
+The staged installer backed up the prior Rust AU. The installed signature verifies,
+its executable SHA-256 matches the built AU, and Apple `auval -v aumu RbR1 Rbit`
+reports **AU VALIDATION SUCCEEDED**. Restart Logic to load the replacement.
+
+## Milestone 5: playback feedback, 2026-11-05
+
+The Rust core observes the final finite output sample after summing, fades and
+gain. Peak attack is immediate; falloff is 24 dB/second, with a separate one-second
+peak hold followed by the same falloff. This is sample-peak feedback, not RMS,
+loudness or inter-sample true-peak measurement. Samples at or above full scale
+increment a wrapping revision, so a short overload cannot be missed between UI
+polls. Observation does not limit or change output.
+
+A new 28-byte read-only playback C ABI snapshot supplies peak/held peak, clip
+revision, active/held/released voice counts and retirement-continuation count.
+Only the audio thread reads the Rust engine. The processor publishes lock-free
+float/integer atomics once per callback; activity counts share one packed atomic
+to preserve their relationship across concurrent reads. The display polls at
+30 Hz. Clip acknowledgement reads native atomics and never mutates Rust from
+the UI. No new parameters or saved fields are introduced; existing engine ABI,
+IDs, defaults, plugin identity and version-1 patches remain compatible.
+
+- **70 Rust tests pass.** Added checks for meter calibration/hold/decay at
+  8–384 kHz, both clip polarities and the full-scale threshold, reset/revision
+  wrapping, post-gain and post-cancellation measurements, silent active voices,
+  pedal/release/retirement counts, and playback ABI size/alignment/null handling.
+- A tracked allocator test covers metering, telemetry reads, release tails and
+  clipped noise playback. There is no Rust heap allocation/reallocation/freeing;
+  irregular partitions produce identical audio and final telemetry. Existing
+  MIDI, automation and host-clock allocation regressions continue to pass.
+- Clippy passes with warnings denied; all four CTest groups pass (Rust core,
+  native processor, actual AU hosting, actual VST3 hosting). Native checks verify
+  a one-sample clipped burst at MIDI offsets 17/18 survives later silence,
+  correct final voice counts, clip history when the real editor opens, its actual
+  clear callback, silence not relatching old events, further clipping relatching,
+  STOP resetting meter/activity, and concurrent UI reads/clip acknowledgement.
+- Rendered and visually inspected the default, populated and clipped editor.
+  The clipped case uses actual three-voice output with one voice released,
+  showing +3.5 dBFS, a red latch, and amber release activity. Images are saved as
+  `preview.png`, `preview-showcase.png`, and `preview-clipping.png`. Tooltips
+  explain the meter and clearing CLIP. No new interactive Logic or listening
+  test is claimed.
+
+The meter is unified for the current mono source duplicated to output channels.
+It reports plugin output before host faders/effects. Held tiles include pedal
+retention and generated arp voices; keyboard feedback continues to describe
+physical/input keys. Brief retirement tails have a separate count beyond regular
+Voices. UI output/activity clear when callbacks cease for 250 ms or three buffer
+durations, whichever is longer. The UI timeout is a display precaution rather
+than an engine reset; clip history stays latched until acknowledged or prepared.
+Ballistics advance in samples, independently of buffer partitioning. UI float
+fields are independent atomic observations; voice-count relationships are packed.
+
+Rebuilt and signed AU/VST3/standalone. The staged installer backed up the previous
+Rust AU. Installed code signature verification succeeds and executable SHA-256
+matches the built AU. Apple `auval -v aumu RbR1 Rbit` reports **AU VALIDATION
+SUCCEEDED**. Restart Logic to load the replacement. Two sound layers is next.
+
+## Milestone 6: two sound layers, 2026-11-05
+
+Added a safe Rust stereo layer mixer around two preallocated engines. Each has
+its own oscillator/noise state, ADSR, tuning and three compiled sequence lanes.
+Layer enable/level/pan use 5 ms ramps; semitone/cent changes use the existing
+tuning ramp without changing MIDI note identity. Center balance is unity in both
+channels; hard pan silences the other channel. Nominal center/endpoints from
+host normalization are snapped within 1e-6 to preserve legacy center behavior.
+Mono outputs average stereo, and the output meter observes the actual mix after
+downmix in mono, or the larger absolute channel sample in stereo.
+
+Layer A remains the shared performance source even when muted. MIDI/controller,
+Voices/mono/glide, arp, modulation settings and frame clock are shared. Disabling
+B fades its contribution and skips B synthesis; enabling copies the current
+performance state without heap work and starts fresh B voices/envelopes/cursors.
+Current generated arp notes, gate/step phase, latch, keys and pedal holds are
+retained where represented by A. Expired release tails and previously discarded
+pedal-only voices are not resurrected. Re-enabling during an unfinished fade
+retains the running B voices. A muted layer A continues its voices and clock.
+
+Voices limits each engine to 1–64 regular voices; there are at most 128 regular
+oscillators plus 128 bounded 3 ms retirement continuations. The B engine is still
+preallocated and receives bounded MIDI/parameter updates while off. A remains
+active as the performance source, so a B-only patch still has A's processing
+cost. This tradeoff avoids a new third clock/voice scheduler in this milestone.
+
+The original 96-byte parameter ABI and existing parameter IDs remain unchanged.
+New layer parameters are appended; a separate 12-byte layer mix ABI and seeded
+second-engine allocation, tuning, mixer render/telemetry calls are added.
+Distinct engines and output buffers are required at the unsafe FFI boundary;
+null right output explicitly selects mono. The UI only reads published atomics.
+Each layer has a separate packed activity word and three atomic playheads.
+
+New version-2 state stores both banks. Version-1 loading explicitly resets all
+new layer controls to defaults and clears B. It preserves A's prior sound and
+existing arp/clock fields, with the earlier migrations for fields absent from
+older patches. Both banks are validated before changing state, published under
+one try-lock handoff, and retired outside the callback. Older binaries reject
+version 2. Plugin identity is unchanged.
+
+- **81 Rust tests pass.** Added single-engine output parity for all oscillator
+  types, separate stereo routing, mixed peak/clip detection, mono downmix,
+  independent sequence/envelope releases, late layer enable with held/pedal
+  notes, sleeping B, short switch/level/pan ramps, tuning/cents continuity,
+  late arp enable/host stop alignment, 128-voice limits, finite invalid inputs,
+  layer ABI/FFI mono/stereo and engine-alias guards.
+- The dual-layer allocation regression performs repeated enable/disable, pan,
+  level, tuning, MIDI and release changes with no Rust allocation, reallocation
+  or freeing. Irregular 7-sample partitions produce identical stereo output and
+  final meter/activity telemetry for matching event positions.
+- Clippy passes with warnings denied, and all four CTest groups pass. Actual AU
+  and VST3 hosts verify A/B panning with different oscillator types. Native tests
+  additionally verify per-layer activity, real-editor selector/attachment routing,
+  drawing into B and enabling only B's lane, preserving invalid/valid drafts on
+  layer switch, version-2 recall, version-1 mix/B reset, rejecting a malformed B
+  bank before any partial replacement, and concurrent publication to both banks.
+- Rendered and inspected default, A-selected showcase, B-selected showcase, and
+  clipping editor states. The new 1320x930 layout retains the earlier controls
+  and adds the layer side panel. Previews are `preview.png`,
+  `preview-showcase.png`, `preview-layer-b.png`, and `preview-clipping.png`.
+  No new interactive Logic or audible listening test is claimed.
+- Generated `dist/rebit-rust-layers-demo.wav`: 4 seconds, 48 kHz stereo PCM16,
+  pulse plus independently sequenced/detuned triangle sub, separate pan.
+  Peaks are 0.2144 left / 0.1979 right; 191,986 of 192,000 frames differ between
+  channels. The renderer's `--layers` flag reproduces it.
+
+### Local processing-cost check
+
+`cargo run --release --offline --locked --example layer_budget` renders one
+second at 48 kHz in 128-frame buffers, taking the median of three runs. On this
+Apple M5 Pro, the observed times were:
+
+| Workload | Render wall time / 1 s audio |
+| --- | ---: |
+| A only, 8 static voices | 3.43 ms |
+| A+B, 8 static voices each | 6.58 ms |
+| A+B, 64 voices each with vibrato | 88.32 ms |
+
+These are offline throughput measurements, not realtime scheduling or device
+latency guarantees; native host/UI overhead and other modulation/retirement
+workloads are outside this small benchmark. No speedup over the original C++
+plugin is claimed.
+
+Rebuilt/signed AU, VST3 and standalone; installed the AU with the staged installer
+and retained the previous Rust component. The installed signature verifies,
+its executable SHA-256 matches the built AU, and Apple `auval -v aumu RbR1 Rbit`
+reports **AU VALIDATION SUCCEEDED**. Restart Logic to load the replacement.
+Milestone 7, Raw/Clean modes and effects, is next.

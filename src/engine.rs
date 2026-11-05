@@ -1,10 +1,24 @@
 //! Fixed-capacity synthesis. Rendering and MIDI handling allocate no memory.
 use crate::arpeggiator::{ArpParameters, Arpeggiator};
+use crate::meter::Meter;
 use crate::sequence::{Cursor, SequenceBank};
+use crate::smoothing::{Blend, Ramp};
 use crate::transport::{ClockParameters, TransportInfo};
 use std::f64::consts::TAU;
 
 pub const MAX_VOICES: usize = 64;
+/// Audio-thread snapshot. Counts exclude finished voices; holds include pedals.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlaybackInfo {
+    pub peak: f32,
+    pub held_peak: f32,
+    pub clips: u32,
+    pub active: u32,
+    pub held: u32,
+    pub released: u32,
+    pub fading: u32,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Parameters {
@@ -107,6 +121,7 @@ struct Voice {
     age: u64,
     phase: f64,
     increment: f64,
+    tuning: f64,
     level: f64,
     stage: u8,
     release_step: f64,
@@ -114,9 +129,14 @@ struct Voice {
     frame: f64,
     glide: f64,
     glide_step: f64,
-    noise: f32,
-    rng: u32,
-    lfsr: u32,
+    noise: [Noise; 3],
+    pitch_offset: Ramp,
+    amplitude_offset: Ramp,
+    smooth_amplitude: bool,
+    fade_in: Ramp,
+    last_amplitude: f64,
+    last_increment: f64,
+    last_duty: [f64; 3],
     cursors: [Cursor; 3],
     arpeggiated: bool,
     sequence_tick: Option<i64>,
@@ -134,6 +154,7 @@ impl Default for Voice {
             age: 0,
             phase: 0.,
             increment: 0.,
+            tuning: 0.,
             level: 0.,
             stage: 0,
             release_step: 1.,
@@ -141,12 +162,65 @@ impl Default for Voice {
             frame: 0.,
             glide: 0.,
             glide_step: 0.,
-            noise: 0.,
-            rng: 1,
-            lfsr: 0x7fff,
+            noise: [Noise::default(); 3],
+            pitch_offset: Ramp::new(0.),
+            amplitude_offset: Ramp::new(0.),
+            smooth_amplitude: false,
+            fade_in: Ramp::new(1.),
+            last_amplitude: 0.,
+            last_increment: 0.,
+            last_duty: [1., 0., 0.],
             cursors: [Cursor::default(); 3],
             arpeggiated: false,
             sequence_tick: None,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct Noise {
+    sample: f32,
+    rng: u32,
+    lfsr: u32,
+}
+impl Default for Noise {
+    fn default() -> Self {
+        Self {
+            sample: 0.,
+            rng: 1,
+            lfsr: 0x7fff,
+        }
+    }
+}
+// Frozen oscillator continuations, never full extra envelope/sequence voices.
+// Bounded storage makes stealing and voice-count edits safe on the audio thread.
+#[derive(Clone, Copy)]
+struct Tail {
+    phase: f64,
+    increment: f64,
+    noise: [Noise; 3],
+    amplitude: f64,
+    remaining: u32,
+    length: u32,
+    wave: [f64; 3],
+    duty: [f64; 3],
+    algorithms: [f64; 3],
+    channel: u8,
+    arpeggiated: bool,
+}
+impl Default for Tail {
+    fn default() -> Self {
+        Self {
+            phase: 0.,
+            increment: 0.,
+            noise: [Noise::default(); 3],
+            amplitude: 0.,
+            remaining: 0,
+            length: 1,
+            wave: [1., 0., 0.],
+            duty: [1., 0., 0.],
+            algorithms: [1., 0., 0.],
+            channel: 0,
+            arpeggiated: false,
         }
     }
 }
@@ -157,7 +231,16 @@ struct Key {
 }
 pub struct Engine {
     params: Parameters,
+    tuning: f64,
+    meter: Meter,
     voices: [Voice; MAX_VOICES],
+    tails: [Tail; MAX_VOICES],
+    gain: Ramp,
+    sustain_level: Ramp,
+    wave: Blend,
+    duty: Blend,
+    algorithms: Blend,
+    duty_sequence: Ramp,
     keys: [[Key; 128]; 16],
     bends: [f64; 16],
     wheels: [f64; 16],
@@ -183,7 +266,16 @@ impl Engine {
     pub fn new(sample_rate: f64, seed: u32) -> Self {
         let mut engine = Self {
             params: Parameters::default(),
+            tuning: 0.,
+            meter: Meter::default(),
             voices: [Voice::default(); MAX_VOICES],
+            tails: [Tail::default(); MAX_VOICES],
+            gain: Ramp::new(0.5),
+            sustain_level: Ramp::new(1.),
+            wave: Blend::new(0),
+            duty: Blend::new(0),
+            algorithms: Blend::new(0),
+            duty_sequence: Ramp::new(0.),
             keys: [[Key::default(); 128]; 16],
             bends: [0.; 16],
             wheels: [0.; 16],
@@ -209,10 +301,14 @@ impl Engine {
         } else {
             44_100.
         };
+        self.meter.prepare(self.sample_rate);
         self.reset();
     }
     pub fn reset(&mut self) {
+        self.meter.reset();
         self.voices.fill(Voice::default());
+        self.tails.fill(Tail::default());
+        self.snap_parameters();
         self.keys.fill([Key::default(); 128]);
         self.bends.fill(0.);
         self.wheels.fill(0.);
@@ -224,27 +320,72 @@ impl Engine {
         self.transport = TransportInfo::default();
         self.transport_frames = 0;
     }
+    fn transition_samples(&self) -> u32 {
+        (self.sample_rate * 0.005).round() as u32
+    }
+    fn tail_samples(&self) -> u32 {
+        (self.sample_rate * 0.003).round() as u32
+    }
+    fn snap_parameters(&mut self) {
+        let p = self.params;
+        self.gain.reset(p.gain as f64);
+        self.sustain_level.reset(p.sustain as f64);
+        self.wave = Blend::new(p.osc);
+        self.duty = Blend::new(p.duty);
+        self.algorithms = Blend::new(p.noise_algorithm);
+        self.duty_sequence.reset(f64::from(p.duty_enabled != 0));
+    }
     pub fn set_parameters(&mut self, params: Parameters) {
         let p = params.sanitized();
-        if p == self.params {
+        let old = self.params;
+        if p == old {
             return;
         }
-        if p.max_poly != self.params.max_poly || p.behavior != self.params.behavior {
-            if self.arp.parameters.enabled == 0 {
-                self.reset();
-            } else {
-                for v in &mut self.voices[p.max_poly as usize..] {
-                    v.active = false;
-                }
-                if self.arp_voice.is_some_and(|i| i >= p.max_poly as usize) {
-                    self.arp_voice = None;
-                }
-            }
-        }
+        let samples = self.transition_samples();
+        let sounding =
+            self.voices.iter().any(|v| v.active) || self.tails.iter().any(|t| t.remaining > 0);
         self.params = p;
+        if sounding {
+            self.gain.target(p.gain as f64, samples);
+            self.sustain_level.target(p.sustain as f64, samples);
+            self.wave.target(p.osc, samples);
+            self.duty.target(p.duty, samples);
+            self.algorithms.target(p.noise_algorithm, samples);
+            self.duty_sequence
+                .target(f64::from(p.duty_enabled != 0), samples);
+        } else {
+            self.snap_parameters();
+        }
+        let pitch_changed = p.bend_range != old.bend_range
+            || p.vibrato_period != old.vibrato_period
+            || p.vibrato_depth != old.vibrato_depth
+            || p.vibrato_delay != old.vibrato_delay
+            || p.ignores_wheel != old.ignores_wheel
+            || p.sweep_initial != old.sweep_initial
+            || p.sweep_time != old.sweep_time
+            || p.pitch_enabled != old.pitch_enabled
+            || p.pitch_mode != old.pitch_mode;
+        let amplitude_changed = p.attack != old.attack
+            || p.decay != old.decay
+            || p.volume_enabled != old.volume_enabled;
         for v in &mut self.voices {
-            if v.active {
-                v.increment = pitch(
+            if !v.active {
+                continue;
+            }
+            if amplitude_changed {
+                v.smooth_amplitude = true;
+            }
+            if p.volume_enabled == 0 && old.volume_enabled != 0 && v.stage != 3 {
+                v.stage = 2;
+            }
+            if p.release != old.release && v.stage == 3 {
+                v.release_step = v.level / (self.sample_rate * (p.release as f64).max(0.003));
+            }
+            if p.portamento != old.portamento && v.glide != 0. {
+                v.glide_step = -v.glide / (self.sample_rate * (p.portamento as f64).max(0.003));
+            }
+            if pitch_changed {
+                let increment = pitch(
                     v,
                     &p,
                     &self.sequences,
@@ -252,11 +393,210 @@ impl Engine {
                     &self.bends,
                     &self.wheels,
                 );
+                smooth_pitch(v, increment, samples);
             }
         }
+        if p.max_poly != old.max_poly || (p.max_poly == 1 && p.behavior != old.behavior) {
+            self.reconcile_voices(old.max_poly);
+        }
+    }
+    fn retire(&mut self, voice: Voice) {
+        if !voice.active || voice.last_amplitude == 0. {
+            return;
+        }
+        let slot = self
+            .tails
+            .iter()
+            .position(|t| t.remaining == 0)
+            .unwrap_or_else(|| {
+                self.tails
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        (a.amplitude.abs() * a.remaining as f64 / a.length as f64)
+                            .total_cmp(&(b.amplitude.abs() * b.remaining as f64 / b.length as f64))
+                    })
+                    .map_or(0, |(i, _)| i)
+            });
+        let length = self.tail_samples().max(1);
+        self.tails[slot] = Tail {
+            phase: voice.phase,
+            increment: voice.last_increment,
+            noise: voice.noise,
+            amplitude: voice.last_amplitude,
+            remaining: length,
+            length,
+            wave: self.wave.current(),
+            duty: voice.last_duty,
+            algorithms: self.algorithms.current(),
+            channel: voice.channel,
+            arpeggiated: voice.arpeggiated,
+        };
+    }
+    fn reconcile_voices(&mut self, previous_limit: i32) {
+        let limit = self.params.max_poly as usize;
+        let old = self.voices;
+        let mono_key = if limit == 1 && self.arp.parameters.enabled == 0 {
+            self.newest_key()
+        } else {
+            None
+        };
+        let mut indices: [usize; MAX_VOICES] = std::array::from_fn(|i| i);
+        indices.sort_unstable_by_key(|&i| {
+            let v = old[i];
+            std::cmp::Reverse((
+                v.active,
+                self.arp_voice == Some(i) && self.arp.parameters.enabled != 0,
+                mono_key.is_some_and(|(c, n, _)| v.channel as usize == c && v.note == n && v.held),
+                v.held,
+                v.sustained || v.sostenuto,
+                v.age,
+            ))
+        });
+        self.voices.fill(Voice::default());
+        let previous_arp = self.arp_voice.take();
+        let mut count = 0;
+        for i in indices {
+            if !old[i].active {
+                continue;
+            }
+            if count < limit {
+                self.voices[count] = old[i];
+                if previous_arp == Some(i) {
+                    self.arp_voice = Some(count);
+                }
+                count += 1;
+            } else {
+                self.retire(old[i]);
+            }
+        }
+        if self.arp.parameters.enabled != 0 {
+            return;
+        }
+        // A physically held key may have lost its voice to earlier stealing.
+        if let Some((ch, note, velocity)) = mono_key {
+            if !self.voices[0].active
+                || self.voices[0].channel as usize != ch
+                || self.voices[0].note != note
+            {
+                let v = self.voices[0];
+                self.retire(v);
+                self.voices[0].active = false;
+                let slot = self.spawn_voice(ch, note, velocity, false);
+                self.fade_restored(slot, self.keys[ch][note as usize].order);
+            }
+        } else if self.params.max_poly > previous_limit {
+            while self.active_voices() < limit {
+                let mut candidate = None;
+                let mut order = 0;
+                for (ch, keys) in self.keys.iter().enumerate() {
+                    for (note, key) in keys.iter().enumerate() {
+                        if key.velocity > 0
+                            && key.order >= order
+                            && !self.voices.iter().any(|v| {
+                                v.active
+                                    && v.held
+                                    && v.channel as usize == ch
+                                    && v.note as usize == note
+                            })
+                        {
+                            candidate = Some((ch, note as u8, key.velocity));
+                            order = key.order;
+                        }
+                    }
+                }
+                let Some((ch, note, velocity)) = candidate else {
+                    break;
+                };
+                let slot = self.spawn_voice(ch, note, velocity, false);
+                self.fade_restored(slot, order);
+            }
+        }
+        self.arp_elapsed = 0.;
+    }
+    fn fade_restored(&mut self, slot: usize, order: u64) {
+        let samples = self.tail_samples();
+        let v = &mut self.voices[slot];
+        v.age = order;
+        v.fade_in.reset(0.);
+        v.fade_in.target(1., samples);
     }
     pub fn parameters(&self) -> Parameters {
         self.params
+    }
+    pub fn set_tuning(&mut self, semitones: f64) {
+        let tuning = if semitones.is_finite() {
+            semitones.clamp(-49., 49.)
+        } else {
+            0.
+        };
+        if self.tuning == tuning {
+            return;
+        }
+        self.tuning = tuning;
+        let samples = self.transition_samples();
+        for v in &mut self.voices {
+            if !v.active {
+                continue;
+            }
+            v.tuning = tuning;
+            let increment = pitch(
+                v,
+                &self.params,
+                &self.sequences,
+                self.sample_rate,
+                &self.bends,
+                &self.wheels,
+            );
+            smooth_pitch(v, increment, samples);
+        }
+    }
+    /// Restart a previously dormant layer from the shared performance. Sound
+    /// parameters and sequence banks stay independent; no heap work occurs.
+    pub fn resume_from(&mut self, source: &Self) {
+        self.reset();
+        self.keys = source.keys;
+        self.bends = source.bends;
+        self.wheels = source.wheels;
+        self.sustain = source.sustain;
+        self.age = source.age;
+        self.tempo = source.tempo;
+        self.clock = source.clock;
+        self.transport = source.transport;
+        self.transport_frames = source.transport_frames;
+        self.arp_elapsed = source.arp_elapsed;
+        self.arp = source.arp.clone();
+        if self.arp.parameters.enabled != 0 {
+            if let Some(slot) = source.arp_voice {
+                let v = source.voices[slot];
+                if v.active && v.stage != 3 {
+                    self.arp_voice = Some(self.spawn_voice(
+                        v.channel as usize,
+                        v.note,
+                        (v.velocity * 127.).round() as u8,
+                        true,
+                    ));
+                }
+            }
+        } else {
+            // Prefer the source's current mono/legacy-arp note, then newest held
+            // voices. Pedal-held voices still represented in the source survive.
+            for v in source.voices.iter().filter(|v| v.active && v.stage != 3) {
+                let slot = self.spawn_voice(
+                    v.channel as usize,
+                    v.note,
+                    (v.velocity * 127.).round() as u8,
+                    false,
+                );
+                self.voices[slot].held = v.held;
+                self.voices[slot].sustained = v.sustained;
+                self.voices[slot].sostenuto = v.sostenuto;
+                self.voices[slot].age = v.age;
+            }
+            if self.params.max_poly > 1 || self.active_voices() == 0 {
+                self.reconcile_voices(0);
+            }
+        }
     }
     pub fn set_tempo(&mut self, bpm: f64) {
         if bpm.is_finite() {
@@ -299,6 +639,11 @@ impl Engine {
         for voice in &mut self.voices {
             if voice.arpeggiated {
                 voice.active = false;
+            }
+        }
+        for tail in &mut self.tails {
+            if tail.arpeggiated {
+                tail.remaining = 0;
             }
         }
         self.arp_voice = None;
@@ -525,6 +870,26 @@ impl Engine {
     pub fn active_voices(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }
+    pub fn playback_info(&self) -> PlaybackInfo {
+        let mut info = PlaybackInfo {
+            peak: self.meter.peak,
+            held_peak: self.meter.held_peak,
+            clips: self.meter.clips,
+            ..PlaybackInfo::default()
+        };
+        for voice in &self.voices {
+            if voice.active {
+                info.active += 1;
+                if voice.stage == 3 {
+                    info.released += 1;
+                } else {
+                    info.held += 1;
+                }
+            }
+        }
+        info.fading = self.tails.iter().filter(|tail| tail.remaining > 0).count() as u32;
+        info
+    }
     pub fn midi(&mut self, status: u8, data1: u8, data2: u8) {
         if data1 > 127 || data2 > 127 {
             return;
@@ -555,17 +920,20 @@ impl Engine {
             0x80 | 0x90 => self.note_off(ch, data1),
             0xe0 => {
                 self.bends[ch] = ((data1 as i32 | ((data2 as i32) << 7)) - 8192) as f64 / 8192.;
-                self.retune(ch);
+                self.retune(ch, true);
             }
             0xb0 => self.controller(ch, data1, data2),
             _ => (),
         }
-        self.retune(ch);
+        if matches!(status & 0xf0, 0x80 | 0x90) {
+            self.retune(ch, false);
+        }
     }
-    fn retune(&mut self, ch: usize) {
+    fn retune(&mut self, ch: usize, smooth: bool) {
+        let samples = self.transition_samples();
         for v in &mut self.voices {
             if v.active && v.channel as usize == ch {
-                v.increment = pitch(
+                let increment = pitch(
                     v,
                     &self.params,
                     &self.sequences,
@@ -573,6 +941,11 @@ impl Engine {
                     &self.bends,
                     &self.wheels,
                 );
+                if smooth {
+                    smooth_pitch(v, increment, samples);
+                } else {
+                    v.increment = increment;
+                }
             }
         }
     }
@@ -624,10 +997,16 @@ impl Engine {
             channel: ch as u8,
             velocity: velocity as f32 / 127.,
             age: self.age,
-            rng: seed.max(1),
+            tuning: self.tuning,
+            noise: [Noise {
+                rng: seed.max(1),
+                ..Noise::default()
+            }; 3],
             ..Voice::default()
         };
-        v.noise = next_noise(&mut v, self.params.noise_algorithm);
+        for (algorithm, noise) in v.noise.iter_mut().enumerate() {
+            noise.sample = next_noise(noise, algorithm);
+        }
         v.increment = pitch(
             &v,
             &self.params,
@@ -637,6 +1016,13 @@ impl Engine {
             &self.wheels,
         );
         v.arpeggiated = arpeggiated;
+        let old = self.voices[slot];
+        // Preserve zero-release arp gates and deliberate note articulation.
+        if old.active && (old.stage != 3 || self.params.release > 0.) {
+            self.retire(old);
+            v.fade_in.reset(0.);
+            v.fade_in.target(1., self.tail_samples());
+        }
         self.voices[slot] = v;
         slot
     }
@@ -715,7 +1101,7 @@ impl Engine {
         match cc {
             1 => {
                 self.wheels[ch] = value as f64 / 127.;
-                self.retune(ch);
+                self.retune(ch, true);
             }
             64 => {
                 self.sustain[ch] = value >= 64;
@@ -748,6 +1134,11 @@ impl Engine {
             }
             120 => {
                 self.keys[ch].fill(Key::default());
+                for tail in &mut self.tails {
+                    if tail.channel as usize == ch {
+                        tail.remaining = 0;
+                    }
+                }
                 for v in &mut self.voices {
                     if v.channel as usize == ch {
                         v.active = false;
@@ -779,7 +1170,7 @@ impl Engine {
                         }
                     }
                 }
-                self.retune(ch);
+                self.retune(ch, true);
             }
             _ => (),
         }
@@ -829,7 +1220,8 @@ impl Engine {
     }
     pub fn render(&mut self, output: &mut [f32]) {
         let dt = 1. / self.sample_rate;
-        let p = self.params;
+        let mut p = self.params;
+        let smoothing_samples = self.transition_samples();
         let sequence_beats = self.clock.sequence_beats();
         let sequence_period = sequence_beats.map_or(1. / 60., |b| b * 60. / self.tempo);
         let host_sequences = sequence_beats.is_some()
@@ -857,6 +1249,12 @@ impl Engine {
             } else {
                 self.arp_tick();
             }
+            let gain = self.gain.next() as f32;
+            p.sustain = self.sustain_level.next() as f32;
+            let wave = self.wave.next();
+            let manual_duty = self.duty.next();
+            let algorithms = self.algorithms.next();
+            let duty_sequence = self.duty_sequence.next();
             let mut sum = 0.;
             for v in &mut self.voices[..p.max_poly as usize] {
                 if !v.active {
@@ -893,8 +1291,8 @@ impl Engine {
                 if p.volume_enabled != 0 {
                     v.level = v.cursors[0].value(&self.sequences.0[0]).unwrap_or(0) as f64 / 15.;
                     if v.stage == 3 && v.cursors[0].value(&self.sequences.0[0]).is_none() {
+                        v.level = 0.;
                         v.active = false;
-                        continue;
                     }
                 } else {
                     match v.stage {
@@ -930,25 +1328,28 @@ impl Engine {
                         }
                     }
                 }
-                let duty = if p.duty_enabled != 0 {
-                    v.cursors[2]
-                        .value(&self.sequences.0[2])
-                        .unwrap_or(p.duty as i16) as usize
-                } else {
-                    p.duty as usize
-                };
-                let raw = match p.osc {
-                    0 => {
-                        if v.phase < [0.125, 0.25, 0.5][duty.min(2)] {
-                            -1.
-                        } else {
-                            1.
-                        }
-                    }
-                    1 => ((1. - 4. * (v.phase - 0.5).abs()) * 7.5).round() as f32 / 7.5,
-                    _ => v.noise,
-                };
-                sum += raw * v.level as f32 * v.velocity * p.gain;
+                let sequence_duty = v.cursors[2]
+                    .value(&self.sequences.0[2])
+                    .unwrap_or(p.duty as i16)
+                    .clamp(0, 2) as usize;
+                let duty = std::array::from_fn(|i| {
+                    manual_duty[i] * (1. - duty_sequence)
+                        + f64::from(i == sequence_duty) * duty_sequence
+                });
+                let base_amplitude = v.level * v.velocity as f64;
+                if v.smooth_amplitude {
+                    v.amplitude_offset.reset(v.last_amplitude - base_amplitude);
+                    v.amplitude_offset.target(0., smoothing_samples);
+                    v.smooth_amplitude = false;
+                }
+                let amplitude =
+                    (base_amplitude + v.amplitude_offset.next()).clamp(0., 1.) * v.fade_in.next();
+                if v.amplitude_offset.running() {
+                    v.active = true;
+                }
+                v.last_amplitude = amplitude;
+                v.last_duty = duty;
+                sum += oscillator(v.phase, &v.noise, wave, duty, algorithms) * amplitude as f32;
                 let dynamic = v.glide != 0.
                     || (p.sweep_initial != 0. && v.time < p.sweep_time as f64)
                     || (p.vibrato_depth > 0. && v.time >= p.vibrato_delay as f64);
@@ -962,13 +1363,14 @@ impl Engine {
                         &self.wheels,
                     );
                 }
-                let old_step = (v.phase * if p.noise_algorithm == 0 { 50. } else { 16. }) as u32;
-                let next = v.phase + v.increment;
-                v.phase = next.fract();
-                let new_step = (v.phase * if p.noise_algorithm == 0 { 50. } else { 16. }) as u32;
-                if p.osc == 2 && (old_step != new_step || next >= 1.) {
-                    v.noise = next_noise(v, p.noise_algorithm);
-                }
+                let correction = v.pitch_offset.next();
+                let increment = if correction == 0. {
+                    v.increment
+                } else {
+                    (v.increment * (correction / 12.).exp2()).min(0.49)
+                };
+                v.last_increment = increment;
+                advance_oscillator(&mut v.phase, &mut v.noise, increment, wave, algorithms);
                 let sweep_ended = p.sweep_initial != 0.
                     && v.time < p.sweep_time as f64
                     && v.time + dt >= p.sweep_time as f64;
@@ -1011,11 +1413,86 @@ impl Engine {
                     );
                 }
             }
+            for tail in &mut self.tails {
+                if tail.remaining == 0 {
+                    continue;
+                }
+                sum += oscillator(
+                    tail.phase,
+                    &tail.noise,
+                    tail.wave,
+                    tail.duty,
+                    tail.algorithms,
+                ) * (tail.amplitude * (tail.remaining - 1) as f64 / tail.length as f64)
+                    as f32;
+                advance_oscillator(
+                    &mut tail.phase,
+                    &mut tail.noise,
+                    tail.increment,
+                    tail.wave,
+                    tail.algorithms,
+                );
+                tail.remaining -= 1;
+            }
+            sum *= gain;
             *out = if sum.is_finite() { sum } else { 0. };
+            self.meter.observe(*out);
             if self.transport.valid != 0 && self.transport.playing != 0 {
                 self.transport.ppq += beat_increment;
                 self.transport_frames = self.transport_frames.saturating_add(1);
             }
+        }
+    }
+}
+fn smooth_pitch(v: &mut Voice, increment: f64, samples: u32) {
+    if v.increment == increment {
+        return;
+    }
+    let current = (v.increment * (v.pitch_offset.current / 12.).exp2()).min(0.49);
+    v.increment = increment;
+    v.pitch_offset.reset(12. * (current / increment).log2());
+    v.pitch_offset.target(0., samples);
+}
+fn oscillator(
+    phase: f64,
+    noise: &[Noise; 3],
+    wave: [f64; 3],
+    duty: [f64; 3],
+    algorithms: [f64; 3],
+) -> f32 {
+    let pulse: f64 = duty
+        .iter()
+        .zip([0.125, 0.25, 0.5])
+        .map(|(weight, width)| weight * if phase < width { -1. } else { 1. })
+        .sum();
+    let triangle = ((1. - 4. * (phase - 0.5).abs()) * 7.5).round() as f32 / 7.5;
+    let random: f64 = noise
+        .iter()
+        .zip(algorithms)
+        .map(|(n, weight)| n.sample as f64 * weight)
+        .sum();
+    (pulse * wave[0] + triangle as f64 * wave[1] + random * wave[2]) as f32
+}
+fn advance_oscillator(
+    phase: &mut f64,
+    noise: &mut [Noise; 3],
+    increment: f64,
+    wave: [f64; 3],
+    algorithms: [f64; 3],
+) {
+    let old = *phase;
+    let next = old + increment;
+    *phase = next.fract();
+    if wave[2] == 0. {
+        return;
+    }
+    for (algorithm, n) in noise.iter_mut().enumerate() {
+        if algorithms[algorithm] == 0. {
+            continue;
+        }
+        let buckets = if algorithm == 0 { 50. } else { 16. };
+        if (old * buckets) as u32 != (*phase * buckets) as u32 || next >= 1. {
+            n.sample = next_noise(n, algorithm);
         }
     }
 }
@@ -1024,6 +1501,8 @@ fn release(v: &mut Voice, p: &Parameters, bank: &SequenceBank, sample_rate: f64)
         return;
     }
     v.stage = 3;
+    v.smooth_amplitude = false;
+    v.amplitude_offset.reset(0.);
     v.sequence_tick = None;
     v.release_step = if p.release == 0. {
         1.
@@ -1058,10 +1537,10 @@ fn pitch(
         0.
     };
     let semitones =
-        v.note as f64 + offset + v.glide + bends[ch] * p.bend_range as f64 + sweep + vib;
+        v.note as f64 + v.tuning + offset + v.glide + bends[ch] * p.bend_range as f64 + sweep + vib;
     (440. * ((semitones - 69.) / 12.).exp2() / sample_rate).min(0.49)
 }
-fn next_noise(v: &mut Voice, algorithm: i32) -> f32 {
+fn next_noise(v: &mut Noise, algorithm: usize) -> f32 {
     if algorithm == 0 {
         let mut x = v.rng;
         x ^= x << 13;
@@ -1546,5 +2025,481 @@ mod seconds_transport_test {
         e.render(&mut [0.; 1]);
         assert_eq!(e.arp_voice, Some(voice));
         assert!((e.voices[voice].time - time - 1. / 8000.).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod live_change_tests {
+    use super::*;
+
+    fn sounding(rate: f64) -> Engine {
+        let mut e = Engine::new(rate, 123);
+        e.midi(0x90, 0, 127);
+        e.render(&mut [0.; 200]);
+        e
+    }
+    #[test]
+    fn gain_and_sustain_live_edits_ramp_without_restarting_a_note() {
+        for rate in [8000., 44100., 48000., 192000., 384000.] {
+            for gain in [false, true] {
+                let mut e = sounding(rate);
+                let phase = e.voices[0].phase;
+                let time = e.voices[0].time;
+                let mut p = e.parameters();
+                if gain {
+                    p.gain = 0.;
+                } else {
+                    p.sustain = 0.25;
+                }
+                e.set_parameters(p);
+                assert_eq!(e.voices[0].phase, phase);
+                assert_eq!(e.voices[0].time, time);
+                let samples = (rate * 0.005).round() as usize;
+                let mut output = vec![0.; samples];
+                e.render(&mut output);
+                let target = if gain { 0. } else { 0.125 };
+                assert!((output[0].abs() - 0.5).abs() <= 0.5 / samples as f32 + 1e-6);
+                assert!((output[samples - 1].abs() - target).abs() < 1e-6);
+                assert!(e.voices[0].held);
+            }
+        }
+    }
+    #[test]
+    fn oscillator_duty_and_noise_changes_crossfade_from_current_sound() {
+        for control in 0..3 {
+            let mut e = sounding(8000.);
+            if control == 2 {
+                let mut p = e.parameters();
+                p.osc = 2;
+                e.set_parameters(p);
+                e.render(&mut [0.; 40]);
+                // Freeze pitch for this measurement so native noise edges are excluded.
+                e.voices[0].increment = 0.;
+            }
+            let mut before = [0.; 1];
+            e.render(&mut before);
+            let phase = e.voices[0].phase;
+            let mut p = e.parameters();
+            match control {
+                0 => p.osc = 1,
+                1 => p.duty = 2,
+                _ => p.noise_algorithm = 1,
+            }
+            e.set_parameters(p);
+            assert_eq!(e.voices[0].phase, phase);
+            let mut after = [0.; 40];
+            e.render(&mut after);
+            assert!((after[0] - before[0]).abs() < 0.027, "control {control}");
+            let weights = match control {
+                0 => e.wave.current(),
+                1 => e.duty.current(),
+                _ => e.algorithms.current(),
+            };
+            assert_eq!(
+                weights,
+                if control == 1 {
+                    [0., 0., 1.]
+                } else {
+                    [0., 1., 0.]
+                }
+            );
+        }
+        let mut e = sounding(8000.);
+        e.set_parameters(Parameters {
+            duty: 2,
+            ..e.parameters()
+        });
+        e.render(&mut [0.; 10]);
+        let previous = e.duty.current();
+        e.set_parameters(Parameters {
+            duty: 1,
+            ..e.parameters()
+        });
+        assert_eq!(e.duty.current(), previous);
+        e.render(&mut [0.; 40]);
+        assert_eq!(e.duty.current(), [0., 1., 0.]);
+    }
+    #[test]
+    fn pitch_bend_and_live_modulation_reach_targets_without_a_frequency_jump() {
+        let mut e = sounding(8000.);
+        let previous = e.voices[0].last_increment;
+        e.midi(0xe0, 127, 127);
+        let target = e.voices[0].increment;
+        assert!(target > previous);
+        e.render(&mut [0.; 1]);
+        assert!((e.voices[0].last_increment / previous - 1.).abs() < 0.004);
+        e.render(&mut [0.; 39]);
+        assert_eq!(e.voices[0].last_increment, target);
+        let previous = target;
+        e.set_parameters(Parameters {
+            bend_range: 24.,
+            ..e.parameters()
+        });
+        e.render(&mut [0.; 1]);
+        assert!((e.voices[0].last_increment / previous - 1.).abs() < 0.04);
+        e.render(&mut [0.; 39]);
+        assert_eq!(e.voices[0].last_increment, e.voices[0].increment);
+        // Lane enable fades the tuning change; actual frame boundaries remain stepped.
+        let mut bank = SequenceBank::default();
+        bank.0[1] = crate::Sequence::parse("12,0", -64, 63).unwrap();
+        e.set_sequences(bank);
+        let previous = e.voices[0].last_increment;
+        e.set_parameters(Parameters {
+            pitch_enabled: 1,
+            ..e.parameters()
+        });
+        e.render(&mut [0.; 1]);
+        assert!(e.voices[0].last_increment < previous * 1.02);
+        e.render(&mut [0.; 39]);
+        assert_eq!(e.voices[0].last_increment, e.voices[0].increment);
+    }
+    #[test]
+    fn volume_lane_toggle_fades_and_frame_edges_stay_crisp() {
+        let mut e = sounding(8000.);
+        let mut bank = SequenceBank::default();
+        bank.0[0] = crate::Sequence::parse("[0,15]", 0, 15).unwrap();
+        e.set_sequences(bank);
+        e.set_parameters(Parameters {
+            volume_enabled: 1,
+            ..e.parameters()
+        });
+        let mut output = [0.; 40];
+        e.render(&mut output);
+        assert!((output[0] - 0.4875).abs() < 1e-6);
+        assert_eq!(output[39], 0.);
+        let remaining = (8000. / 60. - 40_f64).ceil() as usize;
+        e.render(&mut vec![0.; remaining]);
+        let mut edge = [0.; 1];
+        e.render(&mut edge);
+        assert_eq!(edge[0].abs(), 0.5);
+        e.set_parameters(Parameters {
+            volume_enabled: 0,
+            sustain: 0.25,
+            ..e.parameters()
+        });
+        e.render(&mut output);
+        assert!((output[39].abs() - 0.125).abs() < 1e-6);
+        assert_eq!(e.voices[0].stage, 2);
+    }
+    #[test]
+    fn poly_mono_poly_restores_physical_keys_and_preserves_kept_voice_progress() {
+        let mut e = Engine::new(8000., 123);
+        let mut bank = SequenceBank::default();
+        bank.0[1] = crate::Sequence::parse("[0,4,7,12]", -64, 63).unwrap();
+        e.set_sequences(bank);
+        e.set_parameters(Parameters {
+            pitch_enabled: 1,
+            ..e.parameters()
+        });
+        for note in [60, 64, 67] {
+            e.midi(0x90, note, 127);
+        }
+        e.render(&mut [0.; 200]);
+        let latest = e.voices[2];
+        let position = e.sequence_positions();
+        e.set_parameters(Parameters {
+            max_poly: 1,
+            ..e.parameters()
+        });
+        assert_eq!(e.active_voices(), 1);
+        assert_eq!(e.voices[0].note, 67);
+        assert_eq!(e.voices[0].phase, latest.phase);
+        assert_eq!(e.voices[0].time, latest.time);
+        assert_eq!(e.sequence_positions(), position);
+        for behavior in [1, 2, 0, 3] {
+            e.set_parameters(Parameters {
+                behavior,
+                ..e.parameters()
+            });
+            assert_eq!(e.voices[0].time, latest.time);
+            assert_eq!(e.keys[0][60].velocity, 127);
+        }
+        e.set_parameters(Parameters {
+            max_poly: 3,
+            ..e.parameters()
+        });
+        assert_eq!(e.active_voices(), 3);
+        assert_eq!(e.voices[0].phase, latest.phase);
+        for note in [60, 64, 67] {
+            e.midi(0x80, note, 0);
+        }
+        e.render(&mut [0.; 40]);
+        assert_eq!(e.active_voices(), 0);
+        assert!(e.tails.iter().all(|t| t.remaining == 0));
+    }
+    #[test]
+    fn mono_keeps_latest_key_even_if_a_legacy_arp_has_not_played_it() {
+        let mut e = Engine::new(8000., 1);
+        e.set_parameters(Parameters {
+            max_poly: 1,
+            behavior: 1,
+            ..e.parameters()
+        });
+        e.midi(0x90, 60, 127);
+        e.render(&mut [0.; 10]);
+        e.midi(0x90, 67, 127);
+        assert_eq!(e.voices[0].note, 60);
+        e.set_parameters(Parameters {
+            behavior: 0,
+            ..e.parameters()
+        });
+        assert_eq!(e.voices[0].note, 67);
+        e.midi(0x80, 67, 0);
+        assert_eq!(e.voices[0].note, 60);
+        e.midi(0x80, 60, 0);
+        e.render(&mut [0.; 40]);
+        assert_eq!(e.active_voices(), 0);
+    }
+    #[test]
+    fn pedal_holds_and_controller_state_survive_voice_reconciliation() {
+        for cc in [64, 66] {
+            let mut e = Engine::new(8000., 1);
+            for note in [60, 67] {
+                e.midi(0x90, note, 127);
+            }
+            e.midi(0xb0, cc, 127);
+            e.midi(0xe0, 127, 127);
+            for note in [60, 67] {
+                e.midi(0x80, note, 0);
+            }
+            e.render(&mut [0.; 80]);
+            e.set_parameters(Parameters {
+                max_poly: 1,
+                ..e.parameters()
+            });
+            assert_eq!(e.active_voices(), 1);
+            assert!(e.bends[0] > 0.99);
+            e.set_parameters(Parameters {
+                max_poly: 8,
+                ..e.parameters()
+            });
+            assert_eq!(e.active_voices(), 1); // discarded pedal-only keys are not resurrected
+            e.midi(0xb0, cc, 0);
+            e.render(&mut [0.; 40]);
+            assert_eq!(e.active_voices(), 0);
+            assert!(e.tails.iter().all(|t| t.remaining == 0));
+        }
+    }
+    #[test]
+    fn independent_arp_keeps_current_high_slot_when_voice_count_shrinks() {
+        let mut e = Engine::new(8000., 1);
+        e.set_parameters(Parameters {
+            release: 1.,
+            ..e.parameters()
+        });
+        e.set_arp_parameters(ArpParameters {
+            enabled: 1,
+            rate: 15,
+            seconds: 0.01,
+            gate: 1.,
+            ..Default::default()
+        });
+        e.midi(0x90, 60, 127);
+        e.midi(0x90, 67, 127);
+        e.render(&mut [0.; 241]);
+        let slot = e.arp_voice.unwrap();
+        assert!(slot > 0);
+        let current = e.voices[slot];
+        e.set_parameters(Parameters {
+            max_poly: 1,
+            behavior: 2,
+            ..e.parameters()
+        });
+        assert_eq!(e.arp_voice, Some(0));
+        assert_eq!(e.voices[0].note, current.note);
+        assert_eq!(e.voices[0].time, current.time);
+        assert_eq!(e.voices[0].phase, current.phase);
+        e.render(&mut [0.; 80]);
+        assert_ne!(e.voices[e.arp_voice.unwrap()].note, current.note);
+        e.midi(0xb0, 120, 0);
+        let mut silence = [1.; 40];
+        e.render(&mut silence);
+        assert_eq!(silence, [0.; 40]);
+    }
+    #[test]
+    fn removed_and_stolen_voices_fade_for_three_ms_but_panic_is_immediate() {
+        let mut e = sounding(8000.);
+        e.set_parameters(Parameters {
+            behavior: 3,
+            ..e.parameters()
+        });
+        e.midi(0x91, 0, 127);
+        e.render(&mut [0.; 200]);
+        e.set_parameters(Parameters {
+            max_poly: 1,
+            ..e.parameters()
+        });
+        assert_eq!(e.active_voices(), 1);
+        assert_eq!(e.tails.iter().filter(|t| t.remaining > 0).count(), 1);
+        e.midi(0xb1, 120, 0);
+        let mut tail = [0.; 24];
+        e.render(&mut tail);
+        assert!((tail[0].abs() - 0.5 * 23. / 24.).abs() < 1e-6);
+        assert_eq!(tail[23], 0.);
+        e.midi(0x90, 0, 127);
+        e.render(&mut [0.; 200]);
+        e.midi(0x90, 1, 127);
+        let mut first = [0.; 1];
+        e.render(&mut first);
+        assert!((first[0].abs() - 0.5).abs() < 0.05);
+        assert!(e.tails.iter().any(|t| t.remaining > 0));
+        e.midi(0xb0, 120, 0);
+        e.render(&mut first);
+        assert_eq!(first, [0.]);
+        e.reset();
+        assert!(e.tails.iter().all(|t| t.remaining == 0));
+    }
+    #[test]
+    fn zero_release_noteoff_stays_immediate_during_live_fades() {
+        let mut e = sounding(8000.);
+        e.set_parameters(Parameters {
+            gain: 0.1,
+            volume_enabled: 1,
+            ..e.parameters()
+        });
+        e.render(&mut [0.; 1]);
+        e.midi(0x80, 0, 0);
+        let mut output = [1.; 80];
+        e.render(&mut output);
+        assert!(output.iter().all(|&x| x == 0.));
+        assert_eq!(e.active_voices(), 0);
+    }
+    #[test]
+    fn editing_release_to_zero_finishes_with_a_short_fade() {
+        let mut e = sounding(8000.);
+        e.set_parameters(Parameters {
+            release: 1.,
+            ..e.parameters()
+        });
+        e.midi(0x80, 0, 0);
+        e.render(&mut [0.; 100]);
+        e.set_parameters(Parameters {
+            release: 0.,
+            ..e.parameters()
+        });
+        let mut output = [0.; 25];
+        e.render(&mut output);
+        assert!(output[0].abs() > 0.4);
+        assert_eq!(output[24], 0.);
+        assert_eq!(e.active_voices(), 0);
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    #[test]
+    fn host_stop_clears_retiring_generated_voices_immediately() {
+        let mut e = Engine::new(8000., 1);
+        e.set_parameters(Parameters {
+            release: 1.,
+            ..e.parameters()
+        });
+        e.set_arp_parameters(ArpParameters {
+            enabled: 1,
+            rate: 4,
+            gate: 1.,
+            ..Default::default()
+        });
+        e.midi(0x90, 60, 127);
+        e.render(&mut [0.; 751]);
+        e.set_parameters(Parameters {
+            max_poly: 1,
+            ..e.parameters()
+        });
+        assert!(e.tails.iter().any(|t| t.remaining > 0));
+        e.set_transport(TransportInfo {
+            valid: 1,
+            playing: 0,
+            ..Default::default()
+        });
+        let mut silence = [1.; 40];
+        e.render(&mut silence);
+        assert_eq!(silence, [0.; 40]);
+        assert!(e.tails.iter().all(|t| t.remaining == 0));
+    }
+    #[test]
+    fn full_tail_pool_stays_bounded_and_drains_after_rapid_steals() {
+        let mut e = Engine::new(384000., 1);
+        e.set_parameters(Parameters {
+            max_poly: 64,
+            behavior: 3,
+            release: 1.,
+            osc: 2,
+            ..e.parameters()
+        });
+        for note in 0..64 {
+            e.midi(0x90, note, 127);
+        }
+        e.render(&mut [0.; 40]);
+        e.set_parameters(Parameters {
+            max_poly: 1,
+            ..e.parameters()
+        });
+        for note in 64..128 {
+            e.midi(0x90, note, 127);
+            let mut sample = [0.; 1];
+            e.render(&mut sample);
+            assert!(sample[0].is_finite());
+        }
+        assert_eq!(
+            e.tails.iter().filter(|t| t.remaining > 0).count(),
+            MAX_VOICES
+        );
+        assert_eq!(e.active_voices(), 1);
+        e.render(&mut [0.; 1152]);
+        assert!(e.tails.iter().all(|t| t.remaining == 0));
+        e.midi(0xb0, 120, 0);
+        let mut silence = [1.; 1];
+        e.render(&mut silence);
+        assert_eq!(silence, [0.]);
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    #[test]
+    fn peak_is_measured_after_voice_cancellation() {
+        let mut e = Engine::new(8000., 1);
+        e.set_parameters(Parameters {
+            duty: 2,
+            ..e.parameters()
+        });
+        e.midi(0x90, 69, 127);
+        e.midi(0x91, 69, 127);
+        e.voices[1].phase = 0.5;
+        let mut output = [0.; 7];
+        e.render(&mut output);
+        assert_eq!(output, [0.; 7]);
+        let info = e.playback_info();
+        assert_eq!(info.active, 2);
+        assert_eq!(info.peak, 0.);
+        assert_eq!(info.clips, 0);
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+    #[test]
+    fn transpose_and_cents_apply_to_new_and_held_voices_without_restarting() {
+        let mut e = Engine::new(48000., 1);
+        e.set_tuning(-12.07);
+        e.midi(0x90, 69, 127);
+        e.render(&mut [0.; 32]);
+        let expected = 440. * (-12.07_f64 / 12.).exp2() / 48000.;
+        assert!((e.voices[0].increment - expected).abs() < 1e-12);
+        let time = e.voices[0].time;
+        let phase = e.voices[0].phase;
+        e.set_tuning(7.13);
+        assert_eq!(e.voices[0].time, time);
+        assert_eq!(e.voices[0].phase, phase);
+        e.render(&mut [0.; 240]);
+        let expected = 440. * (7.13_f64 / 12.).exp2() / 48000.;
+        assert!((e.voices[0].last_increment - expected).abs() < 1e-12);
+        e.set_tuning(f64::NAN);
+        e.render(&mut [0.; 240]);
+        assert!((e.voices[0].last_increment - 440. / 48000.).abs() < 1e-12);
     }
 }
