@@ -86,12 +86,13 @@ juce_add_plugin(RebitRust
     BUNDLE_ID "audio.rebit.rust.instrument"
     PLUGIN_MANUFACTURER_CODE Rbit
     PLUGIN_CODE RbR1
-    FORMATS VST3 Standalone
+    FORMATS AU VST3 Standalone
     PRODUCT_NAME "Rebit Rust"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/rebit_logo.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/rebit_logo.png"
     IS_SYNTH TRUE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    AU_MAIN_TYPE kAudioUnitType_MusicDevice AU_SANDBOX_SAFE TRUE
     VST3_CATEGORIES Instrument Synth COPY_PLUGIN_AFTER_BUILD FALSE)
 target_sources(RebitRust PRIVATE native/PluginProcessor.cpp native/PluginEditor.cpp native/SequenceCanvas.cpp native/Presets.cpp)
 target_compile_definitions(RebitRust PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
