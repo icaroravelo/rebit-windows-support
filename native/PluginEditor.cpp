@@ -4,10 +4,11 @@
 
 namespace
 {
-const juce::Colour background { 0xff0b1017 }, panel { 0xff121b25 }, inset { 0xff0b121b };
-const juce::Colour ink { 0xffedf2ef }, muted { 0xff91a3b3 }, mint { 0xffc4f575 };
-const juce::Colour cyan { 0xff63dfe5 }, violet { 0xffb5a0f5 }, amber { 0xffffb782 };
-const juce::Colour line { 0xff293744 };
+const juce::Colour background { 0xff070a19 }, panel { 0xff10152e }, inset { 0xff050812 };
+const juce::Colour ink { 0xfff0f3ff }, muted { 0xff8e99c8 }, mint { 0xff3dff7a };
+const juce::Colour cyan { 0xff2ce4ff }, violet { 0xff5b7cff }, amber { 0xffffd23f };
+const juce::Colour red { 0xffff4d5e }, magenta { 0xffff4dd2 };
+const juce::Colour line { 0xff2a3163 };
 constexpr float pi = juce::MathConstants<float>::pi;
 constexpr int accentColourId = 0x234567;
 
@@ -65,17 +66,19 @@ void pixelLogo (juce::Graphics& g, float x, float y, float cell)
         "11111001000010000100001000010011111", // I
         "11111001000010000100001000010000100"  // T
     };
-    juce::Path mark;
+    const juce::Colour colours[] = { red, amber, mint, cyan, violet };
     for (int c = 0; c < 5; ++c)
+    {
+        juce::Path mark;
         for (int row = 0; row < 7; ++row)
             for (int col = 0; col < 5; ++col)
                 if (glyphs[c][row * 5 + col] == '1')
                     mark.addRectangle (x + (float) (c * 6 + col) * cell,
                                        y + (float) row * cell, cell - 0.35f, cell - 0.35f);
-    g.setColour (mint.withAlpha (0.035f));
-    g.fillPath (mark, juce::AffineTransform::translation (0, 3));
-    g.setColour (ink);
-    g.fillPath (mark);
+        juce::DropShadow (colours[c].withAlpha (0.5f), 6, { 0, 1 }).drawForPath (g, mark);
+        g.setColour (colours[c]);
+        g.fillPath (mark);
+    }
 }
 void pixelSpark (juce::Graphics& g, int x, int y, juce::Colour colour)
 {
@@ -141,8 +144,8 @@ public:
         const float body = radius - 8;
         g.setColour (juce::Colours::black.withAlpha (0.4f));
         g.fillEllipse (cx - body, cy - body + 2, body * 2, body * 2);
-        g.setGradientFill (juce::ColourGradient (juce::Colour (0xff293745), cx, cy - body,
-                                                juce::Colour (0xff121b25), cx, cy + body, false));
+        g.setGradientFill (juce::ColourGradient (line.brighter (0.25f), cx, cy - body,
+                                                panel, cx, cy + body, false));
         g.fillEllipse (cx - body, cy - body, body * 2, body * 2);
         g.setColour (line.brighter (0.13f));
         g.drawEllipse (cx - body, cy - body, body * 2, body * 2, 0.8f);
@@ -249,14 +252,14 @@ struct RebitEditor::Keyboard final : public juce::MidiKeyboardComponent
                         bool down, bool over, juce::Colour, juce::Colour) override
     {
         auto r = area.reduced (1, 1);
-        g.setGradientFill (juce::ColourGradient (down ? mint : over ? juce::Colour (0xffe0e9e7) : juce::Colour (0xffa7b7bc),
-                                                r.getTopLeft(), down ? mint.darker (0.15f) : juce::Colour (0xffdae2df), r.getBottomLeft(), false));
+        g.setGradientFill (juce::ColourGradient (down ? mint : over ? juce::Colour (0xffeef2ff) : juce::Colour (0xffb8c4ee),
+                                                r.getTopLeft(), down ? mint.darker (0.15f) : juce::Colour (0xffd8e0fb), r.getBottomLeft(), false));
         g.fillRoundedRectangle (r, 2);
         g.setColour (juce::Colours::black.withAlpha (0.15f));
         g.fillRect (r.removeFromBottom (3));
         if (note % 12 == 0)
         {
-            g.setColour (juce::Colour (0xff384955)); g.setFont (type (9, true));
+            g.setColour (muted); g.setFont (type (9, true));
             g.drawText (juce::MidiMessage::getMidiNoteName (note, true, true, 3), area.toNearestInt().withTrimmedTop (30), juce::Justification::centred);
         }
     }
@@ -266,7 +269,7 @@ struct RebitEditor::Keyboard final : public juce::MidiKeyboardComponent
         auto r = area.reduced (0.5f, 0);
         g.setColour (juce::Colours::black.withAlpha (0.45f));
         g.fillRoundedRectangle (r.translated (1, 2), 2);
-        g.setGradientFill (juce::ColourGradient (down ? cyan.darker (0.35f) : over ? line.brighter (0.2f) : juce::Colour (0xff253541),
+        g.setGradientFill (juce::ColourGradient (down ? cyan.darker (0.35f) : over ? line.brighter (0.2f) : panel,
                                                 r.getTopLeft(), down ? cyan : inset, r.getBottomLeft(), false));
         g.fillRoundedRectangle (r, 2);
         g.setColour (down ? cyan : line.brighter (0.2f));
@@ -402,10 +405,10 @@ struct RebitEditor::PlaybackDisplay final : juce::Component, juce::SettableToolt
     uint32_t revision=0;
     double lastAudio=0.;
     bool idle=true;
-    const juce::Colour red {0xffff727e};
+    const juce::Colour red {0xffff4d5e};
     explicit PlaybackDisplay(RebitProcessor& p) : processor(p) {
         setName("Output and voice activity");
-        setTooltip("Actual output sample peaks, in dBFS. Mint tiles are held/pedalled voices; amber tiles are releases. +FADE counts brief voice-removal continuations. The waveform is a parameter preview.");
+        setTooltip("Actual output sample peaks, in dBFS. Green and blue tiles are held/pedalled voices; yellow tiles are releases. +FADE counts brief voice-removal continuations. The waveform is a parameter preview.");
         clip.setName("Clear output clipping");clip.setTooltip("Latched when output reaches 0 dBFS. Click to clear; further clipping lights it again. Lower LEVEL or reduce stacked voices. Output is not limited.");
         clip.getProperties().set("sequenceSmall",true);clip.setColour(accentColourId,red);
         addAndMakeVisible(clip);clip.onClick=[this]{processor.clearClip();refresh();};
@@ -818,7 +821,7 @@ void RebitEditor::paint (juce::Graphics& g)
     g.setColour (line.withAlpha (0.25f));
     for (int x = 16; x < getWidth(); x += 16)
         for (int y = 16; y < getHeight(); y += 16) g.fillRect (x, y, 1, 1);
-    pixelSpark (g, 33, 49, mint);
+    pixelSpark (g, 33, 49, magenta);
     pixelLogo (g, 80, 42, 6);
     caption (g, "SMALL WAVES. BIG WORLDS.", { 33, 95, 310, 18 }, muted, 10.5f, true);
     g.setColour (mint.withAlpha (0.12f)); g.fillRoundedRectangle (33, 119, 48, 17, 3);
@@ -827,7 +830,7 @@ void RebitEditor::paint (juce::Graphics& g)
 
     const juce::Rectangle<float> screen (380, 24, 716, 112);
     g.setColour (juce::Colours::black.withAlpha (0.35f)); g.fillRoundedRectangle (screen.translated (0, 3), 9);
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff101e24), screen.getTopLeft(), inset, screen.getBottomRight(), false));
+    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff0d1638), screen.getTopLeft(), inset, screen.getBottomRight(), false));
     g.fillRoundedRectangle (screen, 8);
     g.setColour (line.brighter (0.07f)); g.drawRoundedRectangle (screen.reduced (0.5f), 8, 1);
     caption (g, "WAVE PREVIEW", { 400, 37, 150, 17 }, muted, 9, true);

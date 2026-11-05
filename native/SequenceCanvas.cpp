@@ -3,7 +3,7 @@
 
 namespace {
 constexpr int pageSize=16, maxFrames=65534, accentId=0x234567;
-const juce::Colour ink{0xffedf2ef}, muted{0xff91a3b3}, line{0xff293744}, inset{0xff0b121b};
+const juce::Colour ink{0xfff0f3ff}, muted{0xff8e99c8}, line{0xff2a3163}, inset{0xff050812};
 juce::Font mono(float size) { return juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),size,juce::Font::plain)); }
 }
 SequenceCanvas::SequenceCanvas(RebitProcessor& p):processor(p) {
@@ -46,7 +46,7 @@ SequenceCanvas::SequenceCanvas(RebitProcessor& p):processor(p) {
     refresh();startTimerHz(30);
 }
 SequenceCanvas::~SequenceCanvas(){stopTimer();}
-juce::Colour SequenceCanvas::accent() const {return selectedLane==0?juce::Colour(0xffc4f575):selectedLane==1?juce::Colour(0xff63dfe5):juce::Colour(0xffb5a0f5);}
+juce::Colour SequenceCanvas::accent() const {return selectedLane==0?juce::Colour(0xff3dff7a):selectedLane==1?juce::Colour(0xff2ce4ff):juce::Colour(0xff5b7cff);}
 int SequenceCanvas::minValue() const {return selectedLane==1?-pitchRange:0;}
 int SequenceCanvas::maxValue() const {return selectedLane==0?15:selectedLane==1?juce::jmin(63,pitchRange):2;}
 juce::Rectangle<float> SequenceCanvas::grid() const {return {0,50,(float)getWidth(),(float)getHeight()-50};}
@@ -215,5 +215,5 @@ void SequenceCanvas::paint(juce::Graphics& g){
         g.setColour(c.withAlpha(.5f));g.drawVerticalLine((int)stepX(step),48,bounds.getBottom());
     };
     if(data.loopStart>=0)marker(data.loopStart,"LOOP",colour);
-    if(data.releaseStart>=0)marker(boundary,"REL",juce::Colour(0xffffb782));
+    if(data.releaseStart>=0)marker(boundary,"REL",juce::Colour(0xffffd23f));
 }
